@@ -17,15 +17,12 @@
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
 
+mod helpers;
+
 const FIXTURE: &str = "CREATE TABLE t (id INT PRIMARY KEY);";
 
 fn translate(dml: &str) -> Result<Vec<String>, String> {
-    Pg2Sqlite::default()
-        .sql(&format!("{FIXTURE}\n{dml}"))
-        .map_err(|e| e.to_string())?
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .map(pg2sqlite::script::Script::into_vec)
-        .map_err(|e| e.to_string())
+    helpers::translate_prefixed(FIXTURE, dml)
 }
 
 /// Runs the emitted script and returns the last statement's first column.

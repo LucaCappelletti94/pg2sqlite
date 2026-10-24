@@ -9,6 +9,8 @@ use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sql_traits::structs::ParserDB;
 use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
+mod helpers;
+
 const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP, payload JSONB);";
 
 fn schema() -> ParserDB {
@@ -16,21 +18,11 @@ fn schema() -> ParserDB {
 }
 
 fn rev(sqlite_sql: &str) -> Result<String, pg2sqlite::errors::Error> {
-    let schema = schema();
-    let options = Pg2SqliteOptions::default();
-    Pg2Sqlite::default()
-        .reverse_sql(sqlite_sql, &schema, &options)
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+    helpers::reverse_sql_joined(sqlite_sql, &schema())
 }
 
 fn assert_emits(sqlite_sql: &str, want: &str) {
-    let out = rev(sqlite_sql).unwrap_or_else(|e| {
-        panic!("{sqlite_sql}\n  expected output containing {want:?}, got Err: {e}")
-    });
-    assert!(out.contains(want), "{sqlite_sql}\n  expected {want:?} in: {out}");
-    Parser::parse_sql(&PostgreSqlDialect {}, &out).unwrap_or_else(|e| {
-        panic!("{sqlite_sql}\n  reverse output is not valid PostgreSQL: {e}\n{out}")
-    });
+    helpers::assert_reverse_emits(rev, sqlite_sql, want);
 }
 
 fn assert_rejected_with(sqlite_sql: &str, want: &str) {

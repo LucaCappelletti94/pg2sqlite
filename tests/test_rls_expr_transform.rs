@@ -4,25 +4,11 @@
 //! C2: SetExpr::SetOperation in `transform_query`
 //! C3: Missing Expr arms in `transform_outer_table_refs`
 
-use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use diesel::RunQueryDsl;
 
-fn translate(sql: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let stmts = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
-    Ok(stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-}
+mod helpers;
 
-fn apply_all(sql: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let options = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let stmts = Pg2Sqlite::default().sql(sql)?.translate(&options)?.into_vec();
-    let mut conn = SqliteConnection::establish(":memory:")?;
-    for stmt in &stmts {
-        diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
-    }
-    Ok(conn)
-}
-
+use helpers::{apply_rls_sql as apply_all, translate_rls_sql as translate};
 #[test]
 fn rls_policy_case_when_transforms_column_refs() -> Result<(), Box<dyn std::error::Error>> {
     let sql = r#"

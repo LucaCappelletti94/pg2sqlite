@@ -89,7 +89,12 @@ struct Val {
     val: Option<String>,
 }
 
-fn pg_rows(conn: &mut PgConnection, sql: &str) -> Outcome {
+/// Loads `sql` against either engine and maps the result to an `Outcome`.
+/// The query is the translator's output text, which no typed DSL can carry.
+fn rows_outcome<C>(conn: &mut C, sql: &str) -> Outcome
+where
+    diesel::query_builder::SqlQuery: diesel::query_dsl::LoadQuery<'static, C, Val>,
+{
     match diesel::sql_query(sql).load::<Val>(conn) {
         Ok(rows) => {
             Outcome::Rows(
@@ -100,15 +105,12 @@ fn pg_rows(conn: &mut PgConnection, sql: &str) -> Outcome {
     }
 }
 
+fn pg_rows(conn: &mut PgConnection, sql: &str) -> Outcome {
+    rows_outcome(conn, sql)
+}
+
 fn sqlite_rows(conn: &mut SqliteConnection, sql: &str) -> Outcome {
-    match diesel::sql_query(sql).load::<Val>(conn) {
-        Ok(rows) => {
-            Outcome::Rows(
-                rows.into_iter().map(|r| r.val.unwrap_or_else(|| "NULL".to_string())).collect(),
-            )
-        }
-        Err(_) => Outcome::Refused,
-    }
+    rows_outcome(conn, sql)
 }
 
 /// Translates a PG SELECT with the test table as schema context.

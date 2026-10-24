@@ -34,6 +34,28 @@ fn run<'a>(connection: &mut SqliteConnection, statements: impl Iterator<Item = &
     }
 }
 
+/// Proves the freshly created store answers 42 for the initial view row.
+fn expect_initial_row(files: &tempfile::TempDir, script: &Script<String>) {
+    let mut creating = open(files);
+    run(&mut creating, script.iter());
+    let row = schema::result::table
+        .select(schema::result::id)
+        .first::<i32>(&mut creating)
+        .expect("initial view row");
+    assert_eq!(row, 42);
+}
+
+/// Proves the reopened store still answers 42 after the connection program.
+fn expect_replayed_row(files: &tempfile::TempDir, script: &Script<String>) {
+    let mut reopened = open(files);
+    run(&mut reopened, script.connect().expect("connection program"));
+    let row = schema::result::table
+        .select(schema::result::id)
+        .first::<i32>(&mut reopened)
+        .expect("replayed view row");
+    assert_eq!(row, 42);
+}
+
 #[test]
 fn replayed_cte_wildcard_keeps_its_lexical_value() {
     let script = script(
@@ -45,22 +67,8 @@ fn replayed_cte_wildcard_keeps_its_lexical_value() {
          ALTER TABLE papers RENAME COLUMN id TO renamed;",
     );
     let files = tempfile::TempDir::new().expect("files");
-    {
-        let mut creating = open(&files);
-        run(&mut creating, script.iter());
-        let row = schema::result::table
-            .select(schema::result::id)
-            .first::<i32>(&mut creating)
-            .expect("initial view row");
-        assert_eq!(row, 42);
-    }
-    let mut reopened = open(&files);
-    run(&mut reopened, script.connect().expect("connection program"));
-    let row = schema::result::table
-        .select(schema::result::id)
-        .first::<i32>(&mut reopened)
-        .expect("replayed view row");
-    assert_eq!(row, 42);
+    expect_initial_row(&files, &script);
+    expect_replayed_row(&files, &script);
 }
 
 #[test]
@@ -72,22 +80,8 @@ fn replayed_qualified_wildcard_stays_lexical() {
          ALTER TABLE papers RENAME TO archive;",
     );
     let files = tempfile::TempDir::new().expect("files");
-    {
-        let mut creating = open(&files);
-        run(&mut creating, script.iter());
-        let row = schema::result::table
-            .select(schema::result::id)
-            .first::<i32>(&mut creating)
-            .expect("initial view row");
-        assert_eq!(row, 42);
-    }
-    let mut reopened = open(&files);
-    run(&mut reopened, script.connect().expect("connection program"));
-    let row = schema::result::table
-        .select(schema::result::id)
-        .first::<i32>(&mut reopened)
-        .expect("replayed view row");
-    assert_eq!(row, 42);
+    expect_initial_row(&files, &script);
+    expect_replayed_row(&files, &script);
 }
 
 #[test]
@@ -99,22 +93,8 @@ fn replayed_connect_ignores_an_unused_physical_column_drop() {
          ALTER TABLE papers DROP COLUMN n;",
     );
     let files = tempfile::TempDir::new().expect("files");
-    {
-        let mut creating = open(&files);
-        run(&mut creating, script.iter());
-        let row = schema::result::table
-            .select(schema::result::id)
-            .first::<i32>(&mut creating)
-            .expect("initial view row");
-        assert_eq!(row, 42);
-    }
-    let mut reopened = open(&files);
-    run(&mut reopened, script.connect().expect("connection program"));
-    let row = schema::result::table
-        .select(schema::result::id)
-        .first::<i32>(&mut reopened)
-        .expect("replayed view row");
-    assert_eq!(row, 42);
+    expect_initial_row(&files, &script);
+    expect_replayed_row(&files, &script);
 }
 
 #[test]

@@ -32,6 +32,31 @@ fn random_vector(dim: usize) -> Vec<f32> {
     (0..dim).map(|_| rng.random::<f32>()).collect()
 }
 
+/// Translates `sql` with default options, applies every emitted statement to
+/// a fresh in-memory database, and returns it.
+fn translated_database(sql: &str) -> Result<Connection> {
+    let options = Pg2SqliteOptions::default();
+    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
+    let db = Connection::open_in_memory()?;
+    for stmt in &translated {
+        db.execute_batch(&stmt.to_string())?;
+    }
+    Ok(db)
+}
+
+/// Inserts `count` random vectors into `items` in one transaction.
+fn insert_random_vectors(db: &Connection, count: usize, dim: usize) -> Result<()> {
+    debug_assert!(i32::try_from(count).is_ok(), "row ids exceed i32 range");
+    let tx = db.unchecked_transaction()?;
+    let mut insert_stmt = db.prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")?;
+    for i in 0..count {
+        let v = random_vector(dim);
+        insert_stmt.execute(rusqlite::params![i as i32, v.as_bytes()])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 #[test]
 fn test_sqlite_vec_loaded() -> Result<()> {
     helpers::register_sqlite_vec_once();
@@ -58,16 +83,7 @@ fn test_translated_vector_table_works() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-
-    // Execute all translated statements
-    for stmt in &translated {
-        let sql_str = stmt.to_string();
-        db.execute_batch(&sql_str)?;
-    }
+    let db = translated_database(sql)?;
 
     // Insert some data - the triggers should sync to vec0
     let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
@@ -102,14 +118,7 @@ fn test_vec0_knn_query_correctness() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-
-    for stmt in &translated {
-        db.execute_batch(&stmt.to_string())?;
-    }
+    let db = translated_database(sql)?;
 
     // Insert vectors at known positions
     let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0]; // Unit vector along x
@@ -168,29 +177,13 @@ fn test_vec0_indexed_knn_large_dataset() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-
-    for stmt in &translated {
-        db.execute_batch(&stmt.to_string())?;
-    }
+    let db = translated_database(sql)?;
 
     // Insert many random vectors
     println!("Inserting {NUM_VECTORS} vectors of dimension {DIMENSIONS}...");
     let insert_start = Instant::now();
 
-    {
-        let tx = db.unchecked_transaction()?;
-        let mut insert_stmt = db.prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")?;
-
-        for i in 0..NUM_VECTORS {
-            let v = random_vector(DIMENSIONS);
-            insert_stmt.execute(rusqlite::params![i as i32, v.as_bytes()])?;
-        }
-        tx.commit()?;
-    }
+    insert_random_vectors(&db, NUM_VECTORS, DIMENSIONS)?;
 
     println!("Insert took {:?}", insert_start.elapsed());
 
@@ -295,29 +288,13 @@ fn test_vec0_faster_than_naive_at_scale() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-
-    for stmt in &translated {
-        db.execute_batch(&stmt.to_string())?;
-    }
+    let db = translated_database(sql)?;
 
     // Insert many random vectors
     println!("Inserting {NUM_VECTORS} vectors of dimension {DIMENSIONS}...");
     let insert_start = Instant::now();
 
-    {
-        let tx = db.unchecked_transaction()?;
-        let mut insert_stmt = db.prepare("INSERT INTO items (id, embedding) VALUES (?, ?)")?;
-
-        for i in 0..NUM_VECTORS {
-            let v = random_vector(DIMENSIONS);
-            insert_stmt.execute(rusqlite::params![i as i32, v.as_bytes()])?;
-        }
-        tx.commit()?;
-    }
+    insert_random_vectors(&db, NUM_VECTORS, DIMENSIONS)?;
 
     println!("Insert took {:?}", insert_start.elapsed());
 
@@ -397,14 +374,7 @@ fn test_update_trigger_syncs_to_vec0() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-
-    for stmt in &translated {
-        db.execute_batch(&stmt.to_string())?;
-    }
+    let db = translated_database(sql)?;
 
     // Insert initial vector
     let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
@@ -443,13 +413,7 @@ fn an_update_to_null_removes_the_row_from_the_index() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-    for stmt in &translated {
-        db.execute_batch(&stmt.to_string())?;
-    }
+    let db = translated_database(sql)?;
 
     let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
     db.execute("INSERT INTO items (id, embedding) VALUES (1, ?)", [v1.as_bytes()])?;
@@ -481,13 +445,7 @@ fn a_null_row_updated_to_a_vector_joins_the_index() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-    for stmt in &translated {
-        db.execute_batch(&stmt.to_string())?;
-    }
+    let db = translated_database(sql)?;
 
     db.execute("INSERT INTO items (id, embedding) VALUES (1, NULL)", [])?;
     let count: i32 =
@@ -521,13 +479,7 @@ fn a_pk_update_moves_the_indexed_row() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-    for stmt in &translated {
-        db.execute_batch(&stmt.to_string())?;
-    }
+    let db = translated_database(sql)?;
 
     let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
     db.execute("INSERT INTO items (id, embedding) VALUES (1, ?)", [v1.as_bytes()])?;
@@ -551,14 +503,7 @@ fn test_delete_trigger_removes_from_vec0() -> Result<()> {
         );
     ";
 
-    let options = Pg2SqliteOptions::default();
-    let translated = Pg2Sqlite::default().sql(sql).unwrap().translate(&options).unwrap().into_vec();
-
-    let db = Connection::open_in_memory()?;
-
-    for stmt in &translated {
-        db.execute_batch(&stmt.to_string())?;
-    }
+    let db = translated_database(sql)?;
 
     // Insert vectors
     let v1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];

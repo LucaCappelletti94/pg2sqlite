@@ -21,6 +21,22 @@ fn uuid_text_opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default().with_uuid_representation(UuidRepresentation::Text)
 }
 
+/// Opens a vector-enabled connection with `schema` and `seed` applied.
+fn vec_setup(opt: &Pg2SqliteOptions, schema: &str, seed: &str) -> rusqlite::Connection {
+    let stmts = Pg2Sqlite::default()
+        .sql(&format!("{schema}{seed}"))
+        .expect("parse")
+        .translate_to_sql(opt)
+        .expect("translate")
+        .into_vec();
+    // rusqlite: sqlite_vec extension is not exposed through diesel's API.
+    let conn = helpers::vec_connection();
+    for s in &stmts {
+        conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("setup: {e}\n{s}"));
+    }
+    conn
+}
+
 /// Translates `query_sql` (the last statement after `schema_sql`) into a
 /// SQLite string and returns it.
 fn translate_query(schema_sql: &str, query_sql: &str, opt: &Pg2SqliteOptions) -> String {
@@ -300,20 +316,7 @@ fn vector_param_comparison_finds_row() {
     let schema = "CREATE TABLE vecs (id INT PRIMARY KEY, emb vector(3));";
     let seed = "INSERT INTO vecs VALUES (1, '[1.0,2.0,3.0]');";
 
-    let conn = {
-        let stmts = Pg2Sqlite::default()
-            .sql(&format!("{schema}{seed}"))
-            .expect("parse")
-            .translate_to_sql(&opt)
-            .expect("translate")
-            .into_vec();
-        // rusqlite: sqlite_vec extension is not exposed through diesel's API.
-        let conn = helpers::vec_connection();
-        for s in &stmts {
-            conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("setup: {e}\n{s}"));
-        }
-        conn
-    };
+    let conn = vec_setup(&opt, schema, seed);
 
     let q = translate_query(schema, "SELECT id FROM vecs WHERE emb = $1;", &opt);
     // $1 carries the PostgreSQL vector text; the translator wraps it with
@@ -442,19 +445,7 @@ fn vector_param_update_wraps_with_vec_f32() {
     let schema = "CREATE TABLE vecs (id INT PRIMARY KEY, emb vector(3));";
     let seed = "INSERT INTO vecs VALUES (1, '[1.0,2.0,3.0]');";
 
-    let conn = {
-        let stmts = Pg2Sqlite::default()
-            .sql(&format!("{schema}{seed}"))
-            .expect("parse")
-            .translate_to_sql(&opt)
-            .expect("translate")
-            .into_vec();
-        let conn = helpers::vec_connection();
-        for s in &stmts {
-            conn.execute_batch(&format!("{s};")).unwrap_or_else(|e| panic!("setup: {e}\n{s}"));
-        }
-        conn
-    };
+    let conn = vec_setup(&opt, schema, seed);
 
     // finish_value wraps the param with vec_f32 for UPDATE; verify by WHERE
     // comparison.

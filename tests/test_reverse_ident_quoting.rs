@@ -6,14 +6,12 @@
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
+mod helpers;
+
 const SCHEMA: &str = "CREATE TABLE t (c INT, d INT); CREATE TABLE t2 (c INT);";
 
 fn reverse(sqlite_sql: &str) -> String {
-    let translator = Pg2Sqlite::default().sql(SCHEMA).unwrap();
-    let schema = translator.build_schema().unwrap();
-    let options = Pg2SqliteOptions::default();
-    let stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
-    stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    helpers::reverse_translate_against(sqlite_sql, SCHEMA)
 }
 
 #[test]

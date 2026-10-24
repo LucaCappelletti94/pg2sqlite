@@ -75,6 +75,8 @@ fn read_tag(conn: &mut SqliteConnection) -> Option<String> {
 }
 
 /// PostgreSQL ground truth: UPDATE SET tag='y' → tag='y!' (trigger fires).
+/// The WHEN clause must also prevent re-firing under recursive triggers,
+/// which would produce 'y!!' instead of 'y!'.
 #[test]
 fn maintenance_trigger_fires_on_update_to_maintenance_column() {
     let mut conn = apply_schema(BUMP_TAG_SCHEMA);
@@ -95,18 +97,6 @@ fn maintenance_trigger_chains_on_second_update() {
     diesel::sql_query("UPDATE mut SET tag = 'y' WHERE id = 1").execute(&mut conn).expect("first");
     diesel::sql_query("UPDATE mut SET tag = 'z' WHERE id = 1").execute(&mut conn).expect("second");
     assert_eq!(read_tag(&mut conn).as_deref(), Some("z!"));
-}
-
-/// WHEN clause must prevent the trigger from re-firing on its own UPDATE.
-/// Recursion would produce 'y!!' instead of 'y!'.
-#[test]
-fn maintenance_trigger_does_not_recurse_with_recursive_triggers_enabled() {
-    let mut conn = apply_schema(BUMP_TAG_SCHEMA);
-    diesel::sql_query("INSERT INTO mut (id, tag) VALUES (1, 'x')")
-        .execute(&mut conn)
-        .expect("insert");
-    diesel::sql_query("UPDATE mut SET tag = 'y' WHERE id = 1").execute(&mut conn).expect("update");
-    assert_eq!(read_tag(&mut conn).as_deref(), Some("y!"));
 }
 
 #[test]

@@ -5,7 +5,9 @@
 //! argument with `COALESCE(arg, '')` to preserve PostgreSQL semantics.
 
 mod helpers;
-use helpers::translate_sql;
+use helpers::{
+    assert_translated_statements_run as assert_all_stmts_parse_as_sqlite, translate_sql,
+};
 use pg2sqlite::prelude::Pg2SqliteOptions;
 
 fn translate(sql: &str) -> Result<String, String> {
@@ -64,18 +66,4 @@ fn concat_single_arg_produces_coalesced_result() {
         "CONCAT with one arg should still COALESCE-wrap it, got: {output}"
     );
     assert_all_stmts_parse_as_sqlite(sql);
-}
-
-fn assert_all_stmts_parse_as_sqlite(pg_sql: &str) {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in pg2sqlite::prelude::Pg2Sqlite::default()
-        .sql(pg_sql)
-        .expect("parse")
-        .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
-        .expect("translate")
-        .into_vec()
-    {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("translated statement must run in SQLite: {e}\n{stmt}"));
-    }
 }

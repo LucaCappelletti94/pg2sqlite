@@ -27,7 +27,7 @@ use std::cell::Cell;
 mod helpers;
 
 use diesel::prelude::*;
-use helpers::{establish_connection, set_session_username};
+use helpers::{apply_translated_ddl as apply, set_session_username};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 
 diesel::define_sql_function! {
@@ -320,21 +320,6 @@ fn apply_with_exemption(pg: &str) -> SqliteConnection {
         WRITE_IS_EXEMPT.with(Cell::get)
     })
     .expect("register write_is_exempt");
-    conn
-}
-
-/// Applies translated DDL to a fresh in-memory connection. The emitted SQL is
-/// the artifact under test; every subsequent data-path call uses the typed DSL.
-fn apply(pg: &str, opts: &Pg2SqliteOptions) -> SqliteConnection {
-    let translated =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate(opts).expect("translate").into_vec();
-    let mut conn = establish_connection();
-    for statement in &translated {
-        // DDL emitted by the translator cannot be expressed with the typed DSL.
-        diesel::sql_query(statement.to_string())
-            .execute(&mut conn)
-            .unwrap_or_else(|e| panic!("emitted DDL failed: {e}\n{statement}"));
-    }
     conn
 }
 

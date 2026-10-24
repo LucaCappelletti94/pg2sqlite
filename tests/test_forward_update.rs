@@ -4,6 +4,7 @@
 mod helpers;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
+use helpers::execute_joined_statements as execute_all;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
 use sqlparser::{
@@ -15,15 +16,6 @@ use sqlparser::{
     parser::Parser,
 };
 use translate_helpers::translate_default as translate;
-
-/// Execute each non-empty statement in `output` (newline-joined) against an
-/// in-memory SQLite to prove the translator emits valid SQL.
-fn execute_all(output: &str) {
-    let conn = Connection::open_in_memory().unwrap();
-    for s in output.split('\n').filter(|s| !s.trim().is_empty()) {
-        conn.execute_batch(&format!("{s};")).unwrap();
-    }
-}
 
 fn parse_expr(sql: &str) -> Expr {
     Parser::new(&PostgreSqlDialect {}).try_with_sql(sql).unwrap().parse_expr().unwrap()

@@ -14,7 +14,9 @@
 //! Every expected value below was read off PostgreSQL 17 before the change.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use rusqlite::{Connection, types::FromSql};
+use rusqlite::types::FromSql;
+
+mod helpers;
 
 const TABLE: &str = "CREATE TABLE t (ts TIMESTAMP, n DOUBLE PRECISION);";
 
@@ -30,11 +32,7 @@ fn translate(pg: &str) -> String {
 }
 
 fn evaluate<T: FromSql>(pg: &str) -> T {
-    let probe = translate(pg);
-    let connection = Connection::open_in_memory().expect("in-memory SQLite");
-    connection
-        .query_row(&probe, [], |row| row.get::<_, T>(0))
-        .unwrap_or_else(|error| panic!("emitted probe failed: {error}\n{probe}"))
+    helpers::evaluate_probe(&translate(pg))
 }
 
 /// Reverse translates one SQLite statement back to PostgreSQL.

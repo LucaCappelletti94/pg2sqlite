@@ -2,15 +2,12 @@
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
-fn translate(sql: &str) -> Result<String, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(pg2sqlite::script::Script::into_vec)
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-        .map_err(|e| e.to_string())
-}
+mod helpers;
+
+use helpers::{
+    assert_translated_statements_run as assert_all_stmts_parse_as_sqlite,
+    translate_default_joined as translate,
+};
 
 const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);";
 
@@ -194,20 +191,6 @@ fn to_char_tz_code_causes_error() {
     assert!(result.is_err(), "TZ timezone code should produce an error");
     let err = result.unwrap_err();
     assert!(!err.is_empty(), "Should have a non-empty error message: {err}");
-}
-
-fn assert_all_stmts_parse_as_sqlite(pg_sql: &str) {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for stmt in pg2sqlite::prelude::Pg2Sqlite::default()
-        .sql(pg_sql)
-        .expect("parse")
-        .translate(&pg2sqlite::prelude::Pg2SqliteOptions::default())
-        .expect("translate")
-        .into_vec()
-    {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("translated statement must run in SQLite: {e}\n{stmt}"));
-    }
 }
 
 /// PostgreSQL's ISO codes map exactly onto strftime specifiers: IYYY is %G,

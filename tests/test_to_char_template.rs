@@ -16,16 +16,13 @@
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
 
+mod helpers;
+
 const TABLE: &str = "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP);";
 const INSTANT: &str = "2026-08-08 15:04:05";
 
 fn translate(pg: &str) -> Result<Vec<String>, String> {
-    Pg2Sqlite::default()
-        .sql(&format!("{TABLE}\n{pg}"))
-        .map_err(|e| e.to_string())?
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .map(pg2sqlite::script::Script::into_vec)
-        .map_err(|e| e.to_string())
+    helpers::translate_prefixed(TABLE, pg)
 }
 
 fn translate_err(pg: &str) -> String {

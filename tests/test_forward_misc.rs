@@ -9,23 +9,9 @@ mod helpers;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
 
+use helpers::translate_default_or_err as translate_err;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use translate_helpers::translate_default as translate;
-
-fn translate_err(sql: &str) -> String {
-    let result = Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .map(pg2sqlite::script::Script::into_vec);
-    match result {
-        Err(e) => e.to_string(),
-        Ok(stmts) => {
-            // Some statements may be empty (filtered)
-            stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
-        }
-    }
-}
 
 #[test]
 fn fts_gin_with_compound_identifier() {

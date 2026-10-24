@@ -5,32 +5,18 @@
 //! each other byte for byte; a bare `?` canonicalizes to `?N` on its first loop
 //! (the index SQLite itself would assign it) and then stays fixed.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, Translator};
-use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+mod helpers;
 
 const SCHEMA: &str = "CREATE TABLE t (a INT, b INT, c INT, d INT);";
 
 /// SQLite SQL text to PostgreSQL SQL text.
 fn reverse(sqlite_sql: &str) -> String {
-    let translator = Pg2Sqlite::default().sql(SCHEMA).unwrap();
-    let schema = translator.build_schema().unwrap();
-    let options = Pg2SqliteOptions::default();
-    let stmts = translator.reverse_sql(sqlite_sql, &schema, &options).unwrap();
-    stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    helpers::reverse_translate_against(sqlite_sql, SCHEMA)
 }
 
 /// PostgreSQL SQL text to SQLite SQL text.
 fn forward(pg_sql: &str) -> String {
-    let translator = Pg2Sqlite::default().sql(SCHEMA).unwrap();
-    let schema = translator.build_schema().unwrap();
-    let options = Pg2SqliteOptions::default();
-    let stmts = Parser::parse_sql(&PostgreSqlDialect {}, pg_sql).unwrap();
-    stmts
-        .iter()
-        .flat_map(|s| s.translate(&schema, &options).unwrap())
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-        .join("; ")
+    helpers::forward_translate_against(pg_sql, SCHEMA)
 }
 
 #[test]

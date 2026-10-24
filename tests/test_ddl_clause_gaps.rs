@@ -26,14 +26,7 @@ fn translate(sql: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
         .map(pg2sqlite::script::Script::into_vec)
 }
 
-/// Translates `sql` and collects warnings alongside the string vec.
-fn translate_with_warnings(
-    sql: &str,
-) -> Result<(Vec<String>, Vec<TranslationWarning>), pg2sqlite::errors::Error> {
-    let report = Pg2Sqlite::default().sql(sql)?.translate_with_report(&opts())?;
-    let stmts = report.script.iter().map(|s| s.to_string()).collect();
-    Ok((stmts, report.warnings))
-}
+use helpers::translate_with_default_warnings as translate_with_warnings;
 
 /// Executes every statement in `stmts` through rusqlite to confirm they parse
 /// and run without error.

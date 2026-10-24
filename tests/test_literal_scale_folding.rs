@@ -11,18 +11,13 @@
 //! folded factor that does not run is worth nothing, and check that the two
 //! spellings produce the same answer rather than merely both producing one.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
 use rusqlite::Connection;
 
 const FIXTURE: &str = "CREATE TABLE t (id INT PRIMARY KEY, r REAL, amount NUMERIC(10,2));";
 
 fn translate(dml: &str) -> Result<Vec<String>, String> {
-    Pg2Sqlite::default()
-        .sql(&format!("{FIXTURE}\n{dml}"))
-        .map_err(|e| e.to_string())?
-        .translate_to_sql(&Pg2SqliteOptions::default())
-        .map(pg2sqlite::script::Script::into_vec)
-        .map_err(|e| e.to_string())
+    helpers::translate_prefixed(FIXTURE, dml)
 }
 
 /// Runs the emitted script over one row and returns the last statement's first

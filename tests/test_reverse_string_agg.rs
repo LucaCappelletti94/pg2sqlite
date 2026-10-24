@@ -16,7 +16,8 @@
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sql_traits::structs::ParserDB;
-use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+
+mod helpers;
 
 const FIXTURE: &str = "CREATE TABLE tags (id INT PRIMARY KEY, name TEXT, category TEXT);";
 
@@ -27,12 +28,7 @@ fn schema() -> ParserDB {
 /// Reverse-translates `sqlite` and returns the PostgreSQL text, having checked
 /// it parses as PostgreSQL.
 fn reverse(sqlite: &str) -> String {
-    let statements = Pg2Sqlite::default()
-        .reverse_sql(sqlite, &schema(), &Pg2SqliteOptions::default())
-        .expect("reverse translation");
-    let sql = statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
-    Parser::parse_sql(&PostgreSqlDialect {}, &sql).expect("output parses as PostgreSQL");
-    sql
+    helpers::reverse_checked(sqlite, &schema())
 }
 
 /// Forward-translates `pg` and returns the emitted SQLite text.

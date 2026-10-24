@@ -4,25 +4,14 @@
 //! the same bind vector drives both the PostgreSQL original and the SQLite
 //! translation, and so a later reverse translation round trips exactly.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, Translator};
-use sqlparser::{
-    dialect::{PostgreSqlDialect, SQLiteDialect},
-    parser::Parser,
-};
+mod helpers;
+
+use sqlparser::{dialect::SQLiteDialect, parser::Parser};
 
 const SCHEMA: &str = "CREATE TABLE t (a INT, b INT, c INT, d INT);";
 
 fn forward(pg_sql: &str) -> String {
-    let translator = Pg2Sqlite::default().sql(SCHEMA).unwrap();
-    let schema = translator.build_schema().unwrap();
-    let options = Pg2SqliteOptions::default();
-    let stmts = Parser::parse_sql(&PostgreSqlDialect {}, pg_sql).unwrap();
-    stmts
-        .iter()
-        .flat_map(|s| s.translate(&schema, &options).unwrap())
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-        .join("; ")
+    helpers::forward_translate_against(pg_sql, SCHEMA)
 }
 
 fn reparse_sqlite(sql: &str) {

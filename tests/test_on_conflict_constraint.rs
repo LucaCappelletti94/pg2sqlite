@@ -22,6 +22,8 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
+mod helpers;
+
 mod schema {
     diesel::table! {
         t (id) {
@@ -51,13 +53,7 @@ fn translate(pg: &str) -> Vec<String> {
 }
 
 fn apply(pg: &str) -> SqliteConnection {
-    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
-    for statement in translate(pg) {
-        diesel::sql_query(&statement)
-            .execute(&mut conn)
-            .unwrap_or_else(|error| panic!("emitted statement failed: {statement}: {error}"));
-    }
-    conn
+    helpers::apply_statements(&translate(pg))
 }
 
 fn translate_err(pg: &str) -> String {
