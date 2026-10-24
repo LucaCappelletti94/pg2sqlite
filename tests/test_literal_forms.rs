@@ -109,3 +109,52 @@ fn columns_that_differ_by_more_than_case_still_translate() {
         vec![Some("3".to_string())]
     );
 }
+
+/// What PostgreSQL answers for `CAST(v AS TEXT)` after a string literal is
+/// written into a column of `column_type`.
+fn stored_as(column_type: &str, literal: &str) -> Vec<Option<String>> {
+    run_translated_with(
+        &format!(
+            "CREATE TABLE t (v {column_type});
+             INSERT INTO t (v) VALUES ({literal});
+             SELECT CAST(v AS TEXT) FROM t;"
+        ),
+        &Pg2SqliteOptions::default(),
+    )
+}
+
+#[test]
+fn a_string_literal_in_a_boolean_column_reads_as_boolin_reads_it() {
+    for (literal, expected) in [
+        ("'t'", "true"),
+        ("' TRUE '", "true"),
+        ("'y'", "true"),
+        ("'on'", "true"),
+        ("'1'", "true"),
+        ("'f'", "false"),
+        ("'no'", "false"),
+        ("'of'", "false"),
+        ("'0'", "false"),
+    ] {
+        assert_eq!(stored_as("boolean", literal), vec![Some(expected.to_string())], "{literal}");
+    }
+    for literal in ["'o'", "'maybe'", "'10'"] {
+        refusal(&format!("CREATE TABLE t (v boolean); INSERT INTO t (v) VALUES ({literal});"));
+    }
+}
+
+#[test]
+fn a_string_literal_in_a_numeric_column_is_scaled_like_a_number() {
+    for (literal, expected) in [("'12.5'", "12.50"), ("' -3 '", "-3.00"), ("'.25'", "0.25")] {
+        assert_eq!(
+            stored_as("numeric(10,2)", literal),
+            vec![Some(expected.to_string())],
+            "{literal}"
+        );
+    }
+    for literal in ["'NaN'", "'1.2.3'", "'12.505'"] {
+        refusal(&format!(
+            "CREATE TABLE t (v numeric(10,2)); INSERT INTO t (v) VALUES ({literal});"
+        ));
+    }
+}

@@ -1308,10 +1308,14 @@ pub(crate) fn convert_value_for_column_type(
         if is_bound_parameter(&expr) {
             return Ok(scale_parameter(expr, scale));
         }
-        if let Some(scaled) = scale_decimal_literal(&expr, scale)? {
+        let number = numeric_text_literal(&expr)?;
+        if let Some(scaled) = scale_decimal_literal(number.as_ref().unwrap_or(&expr), scale)? {
             return Ok(scaled);
         }
         return Ok(expr);
+    }
+    if matches!(data_type, DataType::Bool | DataType::Boolean) {
+        return boolean_text_literal(expr);
     }
     if matches!(data_type, DataType::Uuid) {
         match options.get_uuid_representation() {
@@ -1376,6 +1380,88 @@ pub(crate) fn convert_value_for_column_type(
         return check_json_document_literal(data_type, expr);
     }
     Ok(expr)
+}
+
+/// The number a string literal written into a `NUMERIC` column holds, which
+/// PostgreSQL reads with the type's input function, or `None` for any other
+/// expression.
+///
+/// # Errors
+///
+/// Returns [`Error::TranslationRefusal`] for text PostgreSQL would not accept,
+/// and for `NaN` and the infinities, which a column of minor units cannot hold.
+fn numeric_text_literal(expr: &Expr) -> Result<Option<Expr>, Error> {
+    let Some(text) = crate::impls::function_helpers::single_quoted_literal(expr) else {
+        return Ok(None);
+    };
+    let trimmed = text.trim();
+    let (negated, unsigned) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let (mantissa, exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map_or((unsigned, None), |(mantissa, exponent)| (mantissa, Some(exponent)));
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |part: &str| part.chars().all(|character| character.is_ascii_digit());
+    let exponent_valid = exponent.is_none_or(|exponent| {
+        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        !exponent.is_empty() && digits(exponent)
+    });
+    if (whole.is_empty() && fraction.is_empty())
+        || !digits(whole)
+        || !digits(fraction)
+        || !exponent_valid
+    {
+        return Err(Error::forward_refusal(format!(
+            "'{text}' is not a number a NUMERIC column can hold as minor units, so it cannot be \
+             written into one."
+        )));
+    }
+    let number = crate::impls::function_helpers::number_literal(unsigned);
+    Ok(Some(if negated {
+        Expr::UnaryOp { op: UnaryOperator::Minus, expr: Box::new(number) }
+    } else {
+        number
+    }))
+}
+
+/// A string literal written into a boolean column, read the way PostgreSQL's
+/// `boolin` reads it, and every other expression unchanged.
+///
+/// # Errors
+///
+/// Returns [`Error::TranslationRefusal`] for text `boolin` rejects.
+fn boolean_text_literal(expr: Expr) -> Result<Expr, Error> {
+    let Some(text) = crate::impls::function_helpers::single_quoted_literal(&expr) else {
+        return Ok(expr);
+    };
+    let Some(value) = postgres_bool(text) else {
+        return Err(Error::forward_refusal(format!(
+            "'{text}' is not a boolean PostgreSQL accepts, so it cannot be written into a boolean \
+             column."
+        )));
+    };
+    Ok(Expr::Value(Value::Boolean(value).with_empty_span()))
+}
+
+/// PostgreSQL's `parse_bool`, which takes any case-insensitive prefix of
+/// `true`, `false`, `yes` and `no`, at least two letters of `on` and `off`, and
+/// `1` or `0`.
+fn postgres_bool(text: &str) -> Option<bool> {
+    let value = text.trim().to_ascii_lowercase();
+    let prefix_of = |word: &str, least: usize| value.len() >= least && word.starts_with(&value);
+    match value.chars().next()? {
+        't' if prefix_of("true", 1) => Some(true),
+        'f' if prefix_of("false", 1) => Some(false),
+        'y' if prefix_of("yes", 1) => Some(true),
+        'n' if prefix_of("no", 1) => Some(false),
+        'o' if prefix_of("on", 2) => Some(true),
+        'o' if prefix_of("off", 2) => Some(false),
+        '1' if value.len() == 1 => Some(true),
+        '0' if value.len() == 1 => Some(false),
+        _ => None,
+    }
 }
 
 /// Converts PostgreSQL's hex-format `bytea` literal into the bytes it names.
