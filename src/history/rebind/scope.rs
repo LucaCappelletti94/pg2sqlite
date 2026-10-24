@@ -8,7 +8,9 @@ use sql_traits::{
     structs::{IdentifierCase, ParserDB, TargetName},
     traits::{ColumnLike, DatabaseLike, TableLike, ViewLike},
 };
-use sqlparser::ast::{Expr, Ident, ObjectName, ObjectNamePart, SelectItem, SetExpr, TableFactor};
+use sqlparser::ast::{
+    Expr, Ident, ObjectName, ObjectNamePart, Select, SelectItem, SetExpr, TableFactor,
+};
 
 use super::Planner;
 use crate::script::ConnectionError;
@@ -60,6 +62,18 @@ impl Planner<'_> {
         listed: &mut Vec<Listed>,
     ) -> Result<(), ConnectionError> {
         self.list_as(factor, listed, false)
+    }
+
+    /// The relations every `FROM` item of `select` names, joins included.
+    pub(super) fn list_from(&self, select: &Select) -> Result<Vec<Listed>, ConnectionError> {
+        let mut listed = Vec::new();
+        for table in &select.from {
+            self.list(&table.relation, &mut listed)?;
+            for join in &table.joins {
+                self.list(&join.relation, &mut listed)?;
+            }
+        }
+        Ok(listed)
     }
 
     /// Records a written table, which no common table expression can name.

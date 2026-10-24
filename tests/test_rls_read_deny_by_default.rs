@@ -25,6 +25,7 @@
 mod helpers;
 
 use diesel::prelude::*;
+use helpers::apply_with_options as apply;
 use pg2sqlite::{
     prelude::{Pg2Sqlite, Pg2SqliteOptions},
     warnings::TranslationWarning,
@@ -104,18 +105,6 @@ fn setup_with_options(
     seed(&mut conn)?;
     for stmt in &triggers {
         diesel::sql_query(stmt.to_string()).execute(&mut conn)?;
-    }
-    Ok(conn)
-}
-
-fn apply(
-    pg: &str,
-    options: &Pg2SqliteOptions,
-) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let translated = Pg2Sqlite::default().sql(pg)?.translate(options)?.into_vec();
-    let mut conn = SqliteConnection::establish(":memory:")?;
-    for statement in &translated {
-        diesel::sql_query(statement.to_string()).execute(&mut conn)?;
     }
     Ok(conn)
 }

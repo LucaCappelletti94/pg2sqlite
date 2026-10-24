@@ -14,24 +14,12 @@ use run_translated_helper::run_translated_with;
 
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use sqlparser::ast::Statement;
-use translate_helpers::translate_default_err as translate_err;
+use pg2sqlite::prelude::Pg2SqliteOptions;
+use translate_helpers::{
+    translate_default_err as translate_err, translate_default_first_query as translate_ok,
+};
 
 const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY, val FLOAT, label TEXT, flag BOOLEAN);";
-
-fn translate_ok(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .into_vec()
-        .into_iter()
-        .find(|s| matches!(s, Statement::Query(_)))
-        .unwrap()
-        .to_string()
-}
 
 /// percentile_cont uses WITHIN GROUP syntax unsupported by SQLite.
 #[test]

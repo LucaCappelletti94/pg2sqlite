@@ -61,15 +61,10 @@ impl Planner<'_> {
             && let sqlparser::ast::OrderByKind::Expressions(keys) = &order_by.kind
             && let Some(outputs) = scope.scope_for_query(query)
         {
-            let mut listed = Vec::new();
-            if let SetExpr::Select(select) = query.body.as_ref() {
-                for table in &select.from {
-                    self.list(&table.relation, &mut listed)?;
-                    for join in &table.joins {
-                        self.list(&join.relation, &mut listed)?;
-                    }
-                }
-            }
+            let listed = match query.body.as_ref() {
+                SetExpr::Select(select) => self.list_from(select)?,
+                _ => Vec::new(),
+            };
             self.frames.push(listed);
             let mut result = Ok(());
             for key in keys {
@@ -144,13 +139,7 @@ impl Planner<'_> {
         header: Header,
     ) -> Result<(), ConnectionError> {
         let Some(inner) = scope.scope_for_select(select) else { return Ok(()) };
-        let mut listed = Vec::new();
-        for table in &select.from {
-            self.list(&table.relation, &mut listed)?;
-            for join in &table.joins {
-                self.list(&join.relation, &mut listed)?;
-            }
-        }
+        let listed = self.list_from(select)?;
         self.frames.push(listed);
         let result = self.select_clauses(scope, &inner, select, header);
         self.frames.pop();

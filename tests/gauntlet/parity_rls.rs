@@ -58,6 +58,56 @@ fn arm_triggers(conn: &mut SqliteConnection, triggers: &[String]) {
     }
 }
 
+/// Vendor-specific session commands shared by the Pg runners. `SET` session
+/// variables have no typed DSL form.
+fn pg_set_session_user(connection: &mut PgConnection, current_role: &mut String, user: Uuid) {
+    diesel::sql_query(format!("SET app.user_id = '{user}'"))
+        .execute(connection)
+        .expect("set session user");
+    if current_role.is_empty() {
+        diesel::sql_query("SET ROLE app").execute(connection).expect("set role app");
+        *current_role = "app".to_string();
+    }
+}
+
+/// The column values of one `tenant_users` membership row.
+type TenantUserRow<'a> = (
+    diesel::dsl::Eq<tenant_schema::tenant_users::id, Uuid>,
+    diesel::dsl::Eq<tenant_schema::tenant_users::tenant_id, Uuid>,
+    diesel::dsl::Eq<tenant_schema::tenant_users::user_id, Uuid>,
+    diesel::dsl::Eq<tenant_schema::tenant_users::role, &'a str>,
+);
+
+/// The insert of one `tenant_users` membership row.
+type TenantUserInsert<'a> = diesel::dsl::Values<
+    diesel::dsl::insert_into<tenant_schema::tenant_users::table>,
+    TenantUserRow<'a>,
+>;
+
+/// Seeds a tenant membership row. The seed shape is the same on both engines,
+/// so the insert is shared between them.
+fn seed_tenant_membership<'r, C>(
+    connection: &mut C,
+    id: Uuid,
+    tenant: Uuid,
+    user: Uuid,
+    role: &'r str,
+) where
+    C: diesel::Connection,
+    TenantUserInsert<'r>: diesel::query_dsl::methods::ExecuteDsl<C>,
+{
+    use tenant_schema::tenant_users;
+    diesel::insert_into(tenant_users::table)
+        .values((
+            tenant_users::id.eq(id),
+            tenant_users::tenant_id.eq(tenant),
+            tenant_users::user_id.eq(user),
+            tenant_users::role.eq(role),
+        ))
+        .execute(connection)
+        .expect("seed tenant_user");
+}
+
 // ════════════════════════════════════════════════════════════════
 // rls_basic: documents owned by a single user, four-policy table.
 // ════════════════════════════════════════════════════════════════
@@ -156,15 +206,7 @@ impl_basic_step!(BasicSqliteRunner);
 impl BasicPgRunner {
     fn become_user(&mut self, user: Uuid) {
         self.acting = user;
-        // Vendor-specific session commands.
-        diesel::sql_query(format!("SET app.user_id = '{user}'"))
-            .execute(&mut self.connection)
-            .expect("set session user");
-        if self.current_role.is_empty() {
-            // Vendor-specific role switch so RLS applies.
-            diesel::sql_query("SET ROLE app").execute(&mut self.connection).expect("set role app");
-            self.current_role = "app".to_string();
-        }
+        pg_set_session_user(&mut self.connection, &mut self.current_role, user);
     }
 
     fn stored_count(&mut self) -> i64 {
@@ -407,16 +449,8 @@ impl_multi_step!(MultiSqliteRunner);
 impl MultiPgRunner {
     fn become_user(&mut self, user: Uuid) {
         self.acting = user;
-        // Vendor-specific session commands.
-        diesel::sql_query(format!("SET app.user_id = '{user}'"))
-            .execute(&mut self.connection)
-            .expect("set session user");
-        if self.current_role.is_empty() {
-            diesel::sql_query("SET ROLE app").execute(&mut self.connection).expect("set role app");
-            self.current_role = "app".to_string();
-        }
+        pg_set_session_user(&mut self.connection, &mut self.current_role, user);
     }
-
     fn set_department(&mut self, opt_dept: Option<&str>) {
         let sql = match opt_dept {
             Some(d) => format!("SET app.user_department = '{d}'"),
@@ -710,15 +744,8 @@ impl_tenant_step!(TenantSqliteRunner);
 impl TenantPgRunner {
     fn become_user(&mut self, user: Uuid) {
         self.acting = user;
-        diesel::sql_query(format!("SET app.user_id = '{user}'"))
-            .execute(&mut self.connection)
-            .expect("set session user");
-        if self.current_role.is_empty() {
-            diesel::sql_query("SET ROLE app").execute(&mut self.connection).expect("set role app");
-            self.current_role = "app".to_string();
-        }
+        pg_set_session_user(&mut self.connection, &mut self.current_role, user);
     }
-
     fn stored_count(&mut self) -> i64 {
         use tenant_schema::projects;
         let role = self.current_role.clone();
@@ -742,16 +769,7 @@ impl TenantPgRunner {
     }
 
     fn seed_membership(&mut self, id: Uuid, tenant: Uuid, user: Uuid, role: &str) {
-        use tenant_schema::tenant_users;
-        diesel::insert_into(tenant_users::table)
-            .values((
-                tenant_users::id.eq(id),
-                tenant_users::tenant_id.eq(tenant),
-                tenant_users::user_id.eq(user),
-                tenant_users::role.eq(role),
-            ))
-            .execute(&mut self.connection)
-            .expect("seed tenant_user");
+        seed_tenant_membership(&mut self.connection, id, tenant, user, role);
     }
 
     fn seed_project(&mut self, id: Uuid, tenant: Uuid, name: &str, creator: Uuid) {
@@ -788,16 +806,7 @@ impl TenantSqliteRunner {
     }
 
     fn seed_membership(&mut self, id: Uuid, tenant: Uuid, user: Uuid, role: &str) {
-        use tenant_schema::tenant_users;
-        diesel::insert_into(tenant_users::table)
-            .values((
-                tenant_users::id.eq(id),
-                tenant_users::tenant_id.eq(tenant),
-                tenant_users::user_id.eq(user),
-                tenant_users::role.eq(role),
-            ))
-            .execute(&mut self.connection)
-            .expect("seed tenant_user");
+        seed_tenant_membership(&mut self.connection, id, tenant, user, role);
     }
 
     fn seed_project(&mut self, id: Uuid, tenant: Uuid, name: &str, creator: Uuid) {

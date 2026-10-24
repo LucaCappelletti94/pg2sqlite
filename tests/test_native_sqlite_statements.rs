@@ -21,7 +21,9 @@
 //! (verified), so it needs translating to `ALTER TABLE ... RENAME TO`, which is
 //! plan item R13.
 
-use diesel::{prelude::*, sql_query};
+use diesel::prelude::*;
+
+mod helpers;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 
 const BASE: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);";
@@ -45,19 +47,7 @@ fn emitted(pg: &str) -> Vec<String> {
     all[fixture + 1..].to_vec()
 }
 
-/// Applies every emitted statement to a fresh database.
-///
-/// The generated SQL is the artifact under test, so it is executed as text. No
-/// typed query can stand in for "run exactly what the translator produced".
-fn apply(pg: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let statements =
-        Pg2Sqlite::default().sql(pg)?.translate(&Pg2SqliteOptions::default())?.into_vec();
-    let mut conn = SqliteConnection::establish(":memory:")?;
-    for statement in &statements {
-        sql_query(statement.to_string()).execute(&mut conn)?;
-    }
-    Ok(conn)
-}
+use helpers::apply_default as apply;
 
 /// `ANALYZE` is SQLite's own statement and must survive.
 #[test]

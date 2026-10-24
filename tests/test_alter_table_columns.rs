@@ -53,17 +53,7 @@ fn table_info(conn: &mut SqliteConnection) -> Result<Vec<ColumnInfo>, Box<dyn st
     Ok(diesel::sql_query("PRAGMA table_info(t)").load(conn)?)
 }
 
-/// Translates `pg` and applies every emitted statement. The emitted DDL is the
-/// artifact under test, so it is applied as generated text.
-fn apply(pg: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let translated =
-        Pg2Sqlite::default().sql(pg)?.translate(&Pg2SqliteOptions::default())?.into_vec();
-    let mut conn = SqliteConnection::establish(":memory:")?;
-    for statement in &translated {
-        diesel::sql_query(statement.to_string()).execute(&mut conn)?;
-    }
-    Ok(conn)
-}
+use helpers::apply_default as apply;
 
 const BASE: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT NOT NULL);";
 

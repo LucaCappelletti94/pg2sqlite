@@ -13,7 +13,7 @@
 mod helpers;
 
 use diesel::prelude::*;
-use helpers::{establish_connection, set_session_username};
+use helpers::{apply_translated_ddl as apply, set_session_username};
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions, SessionVariableMapping};
 
 mod schema {
@@ -69,21 +69,6 @@ fn default_opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
         .with_rls_audit_table_name("rls_audit")
         .with_session_variable(SessionVariableMapping::current_user("current_app_username"))
-}
-
-/// Applies translated DDL to a fresh in-memory connection. The emitted SQL is
-/// the artifact under test, so it runs as generated text; every other
-/// statement uses the typed DSL.
-fn apply(pg: &str, opts: &Pg2SqliteOptions) -> SqliteConnection {
-    let translated =
-        Pg2Sqlite::default().sql(pg).expect("parse").translate(opts).expect("translate").into_vec();
-    let mut conn = establish_connection();
-    for statement in &translated {
-        diesel::sql_query(statement.to_string())
-            .execute(&mut conn)
-            .unwrap_or_else(|e| panic!("emitted DDL failed: {e}\n{statement}"));
-    }
-    conn
 }
 
 /// Translates `pg_dml` in the context of `schema` and executes the result.

@@ -16,6 +16,8 @@
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
 
+mod helpers;
+
 /// The last statement of a translation, which is the probe.
 fn translate(pg: &str) -> String {
     Pg2Sqlite::default()
@@ -30,11 +32,7 @@ fn translate(pg: &str) -> String {
 
 /// The first column of the first row of the emitted probe.
 fn evaluate<T: rusqlite::types::FromSql>(pg: &str) -> T {
-    let probe = translate(pg);
-    let connection = Connection::open_in_memory().expect("in-memory SQLite");
-    connection
-        .query_row(&probe, [], |row| row.get::<_, T>(0))
-        .unwrap_or_else(|error| panic!("emitted probe failed: {error}\n{probe}"))
+    helpers::evaluate_probe(&translate(pg))
 }
 
 /// The shape the README shows, on an ASCII pattern. Both halves are lowered

@@ -210,6 +210,31 @@ fn seed_papers(connection: &mut SqliteConnection) {
     set_write_exempt(false);
 }
 
+/// Seeds the `notes` backing table directly, the way a server sync would.
+fn seed_notes(connection: &mut SqliteConnection) {
+    set_write_exempt(true);
+    diesel::insert_into(notes::table)
+        .values(&[
+            (notes::id.eq(1), notes::owner.eq("alice")),
+            (notes::id.eq(2), notes::owner.eq("bob")),
+        ])
+        .execute(connection)
+        .expect("seed notes");
+    set_write_exempt(false);
+}
+
+/// Creates the store set `label`, initializes both files with `script`, and
+/// seeds the `notes` backing table as user alice.
+fn seed_in_fresh_store(label: &str, script: &Script<String>) -> Files {
+    let files = Files::new(label);
+    {
+        let mut alice = files.connect("alice");
+        run(&mut alice, script.initialize(FreshFiles::Both).expect("initialize"));
+        seed_notes(&mut alice);
+    }
+    files
+}
+
 fn visible_papers(connection: &mut SqliteConnection) -> Vec<(i32, String)> {
     papers::table.order(papers::id).load(connection).expect("read papers")
 }
@@ -270,20 +295,7 @@ fn a_second_main_file_reads_an_existing_shared_file_through_its_policy() {
     ";
     let script =
         translate(NOTES, &options().with_attached_tables("shared", ["notes"])).expect("translate");
-    let files = Files::new("second-main");
-    {
-        let mut alice = files.connect("alice");
-        run(&mut alice, script.initialize(FreshFiles::Both).expect("initialize"));
-        set_write_exempt(true);
-        diesel::insert_into(notes::table)
-            .values(&[
-                (notes::id.eq(1), notes::owner.eq("alice")),
-                (notes::id.eq(2), notes::owner.eq("bob")),
-            ])
-            .execute(&mut alice)
-            .expect("seed notes");
-        set_write_exempt(false);
-    }
+    let files = seed_in_fresh_store("second-main", &script);
 
     let mut bob = files.connect_second("bob");
     run(&mut bob, script.initialize(FreshFiles::Main).expect("main-only initialization"));
@@ -336,20 +348,7 @@ fn a_fresh_attached_store_keeps_the_policy_of_an_unrelated_main_table() {
         CREATE TABLE papers (id INT PRIMARY KEY, title TEXT NOT NULL);
     ";
     let script = translate(NOTES, &placed_options()).expect("translate");
-    let files = Files::new("fresh-attached-unrelated");
-    {
-        let mut alice = files.connect("alice");
-        run(&mut alice, script.initialize(FreshFiles::Both).expect("initialize"));
-        set_write_exempt(true);
-        diesel::insert_into(notes::table)
-            .values(&[
-                (notes::id.eq(1), notes::owner.eq("alice")),
-                (notes::id.eq(2), notes::owner.eq("bob")),
-            ])
-            .execute(&mut alice)
-            .expect("seed notes");
-        set_write_exempt(false);
-    }
+    let files = seed_in_fresh_store("fresh-attached-unrelated", &script);
     std::fs::remove_file(&files.shared).expect("remove the closed store");
 
     let mut bob = files.connect("bob");

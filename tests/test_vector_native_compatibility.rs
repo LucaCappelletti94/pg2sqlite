@@ -30,6 +30,29 @@ struct Distance {
     distance: f64,
 }
 
+/// Executes every emitted statement, loading rows of `T` from any query
+/// statement.
+fn run_emitted<T>(
+    statements: &pg2sqlite::script::Script<sqlparser::ast::Statement>,
+    connection: &mut diesel::sqlite::SqliteConnection,
+) -> Vec<T>
+where
+    diesel::query_builder::SqlQuery:
+        diesel::query_dsl::LoadQuery<'static, diesel::sqlite::SqliteConnection, T>,
+{
+    let mut rows = Vec::new();
+    for statement in statements.iter() {
+        // Emitted statements are dynamic SQL.
+        let query = diesel::sql_query(statement.to_string());
+        if matches!(statement, sqlparser::ast::Statement::Query(_)) {
+            rows = query.load::<T>(connection).unwrap();
+        } else {
+            query.execute(connection).unwrap();
+        }
+    }
+    rows
+}
+
 fn half_schema() -> ParserDB {
     ParserDB::from_statements(
         Parser::parse_sql(
@@ -228,16 +251,7 @@ fn an_explicit_caller_codec_preserves_genuine_binary16_bytes() {
             .collect::<Vec<_>>()
     })
     .unwrap();
-    let mut rows = Vec::new();
-    for statement in statements.iter() {
-        // Emitted statements are dynamic SQL.
-        let query = diesel::sql_query(statement.to_string());
-        if matches!(statement, sqlparser::ast::Statement::Query(_)) {
-            rows = query.load::<Encoded>(&mut connection).unwrap();
-        } else {
-            query.execute(&mut connection).unwrap();
-        }
-    }
+    let rows = run_emitted::<Encoded>(&statements, &mut connection);
     assert_eq!(rows, vec![Encoded { encoded: vec![0x66, 0x2e, 0x66, 0x32, 0xcd, 0x34] }]);
 }
 
@@ -258,16 +272,7 @@ fn float32_distance_executes_with_an_opaque_function_relation() {
         .translate(&options)
         .unwrap();
     let mut connection = diesel::sqlite::SqliteConnection::establish(":memory:").unwrap();
-    let mut rows = Vec::new();
-    for statement in statements.iter() {
-        // Emitted statements are dynamic SQL.
-        let query = diesel::sql_query(statement.to_string());
-        if matches!(statement, sqlparser::ast::Statement::Query(_)) {
-            rows = query.load::<Distance>(&mut connection).unwrap();
-        } else {
-            query.execute(&mut connection).unwrap();
-        }
-    }
+    let rows = run_emitted::<Distance>(&statements, &mut connection);
     assert_eq!(
         rows,
         vec![

@@ -35,7 +35,9 @@ use crate::{
             numeric_minor_unit_scales_of_table, translate_conflict_predicate,
             translate_on_conflict_do_update, translate_returning,
         },
-        translator_impls::insert::{for_each_insert_position, insert_target_scope},
+        translator_impls::insert::{
+            for_each_insert_position, insert_column_names, insert_target_scope,
+        },
     },
     prelude::ReverseTranslator,
 };
@@ -249,19 +251,6 @@ fn build_upsert_on_conflict(
 
 type ParserTable = <ParserDB as DatabaseLike>::Table;
 
-/// Column names the INSERT targets, in value order.
-fn reverse_insert_column_names(
-    insert: &Insert,
-    table: &ParserTable,
-    schema: &ParserDB,
-) -> Result<Vec<String>, Error> {
-    if insert.columns.is_empty() {
-        Ok(table.columns(schema)?.map(|c| c.column_name().to_owned()).collect())
-    } else {
-        Ok(insert.columns.iter().filter_map(|n| last_ident(n).map(|i| i.value.clone())).collect())
-    }
-}
-
 /// Unscales integer literals at NUMERIC column positions back to decimal form.
 ///
 /// Mirrors the forward `scale_numeric_literals` but divides by 10^s rather than
@@ -275,7 +264,7 @@ fn unscale_numeric_literals(
     if scales.is_empty() {
         return Ok(());
     }
-    let column_names = reverse_insert_column_names(insert, table, schema)?;
+    let column_names = insert_column_names(insert, table, schema)?;
     let Some(source) = insert.source.as_deref_mut() else { return Ok(()) };
     for_each_insert_position(source.body.as_mut(), &column_names, &mut |idx, mut expr| {
         if let Some(column) = column_names.get(idx)

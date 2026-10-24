@@ -13,14 +13,9 @@
 //! with a misleading message; SELECT/UPDATE/DELETE passed through silently.
 //! This test covers both the consistent refusal and the improved messages.
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
 
-fn reverse_err(pg_ddl: &str, sqlite_sql: &str) -> String {
-    let translator = Pg2Sqlite::default().sql(pg_ddl).unwrap();
-    let schema = translator.build_schema().unwrap();
-    let options = Pg2SqliteOptions::default();
-    translator.reverse_sql(sqlite_sql, &schema, &options).unwrap_err().to_string()
-}
+use helpers::reverse_sql_err as reverse_err;
 
 const SCHEMA: &str = "CREATE TABLE t (id INT PRIMARY KEY, v TEXT);";
 

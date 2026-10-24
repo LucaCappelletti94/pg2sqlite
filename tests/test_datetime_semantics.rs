@@ -54,78 +54,48 @@ fn translate_err(pg: &str) -> String {
         .to_string()
 }
 
-/// Run the translated form of `select_list` against the date/time table.
-/// Returns the first column of the single result row as a string.
-fn eval_dt(select_list: &str) -> Option<String> {
-    let script = translate_sql(&format!("{DT_DDL}\nSELECT {select_list} FROM t WHERE id = 1;"));
+/// Applies the translated DDL of `ddl`, seeds `seed`, and probes the last
+/// emitted statement, returning its first column as `Option<T>`.
+fn eval_row<T: rusqlite::types::FromSql>(ddl: &str, seed: &str, select_list: &str) -> Option<T> {
+    let script = translate_sql(&format!("{ddl}\nSELECT {select_list} FROM t WHERE id = 1;"));
     let conn = Connection::open_in_memory().expect("in-memory SQLite");
     for stmt in &script[..script.len() - 1] {
         conn.execute_batch(&format!("{stmt};"))
             .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
     }
-    conn.execute_batch(DT_ROW).expect("seed row");
+    conn.execute_batch(seed).expect("seed row");
     let probe = script.last().expect("a query");
-    conn.query_row(probe, [], |r| r.get::<_, Option<String>>(0))
+    conn.query_row(probe, [], |r| r.get::<_, Option<T>>(0))
         .unwrap_or_else(|e| panic!("query failed: {e}\n{probe}"))
+}
+
+/// Run the translated form of `select_list` against the date/time table.
+/// Returns the first column of the single result row as a string.
+fn eval_dt(select_list: &str) -> Option<String> {
+    eval_row::<String>(DT_DDL, DT_ROW, select_list)
 }
 
 /// Like `eval_dt` but returns the first column as a 64-bit integer.
 fn eval_dt_i64(select_list: &str) -> Option<i64> {
-    let script = translate_sql(&format!("{DT_DDL}\nSELECT {select_list} FROM t WHERE id = 1;"));
-    let conn = Connection::open_in_memory().expect("in-memory SQLite");
-    for stmt in &script[..script.len() - 1] {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
-    }
-    conn.execute_batch(DT_ROW).expect("seed row");
-    let probe = script.last().expect("a query");
-    conn.query_row(probe, [], |r| r.get::<_, Option<i64>>(0))
-        .unwrap_or_else(|e| panic!("query failed: {e}\n{probe}"))
+    eval_row::<i64>(DT_DDL, DT_ROW, select_list)
 }
 
 /// Like `eval_dt` but returns the first column as an f64.
 fn eval_dt_f64(select_list: &str) -> Option<f64> {
-    let script = translate_sql(&format!("{DT_DDL}\nSELECT {select_list} FROM t WHERE id = 1;"));
-    let conn = Connection::open_in_memory().expect("in-memory SQLite");
-    for stmt in &script[..script.len() - 1] {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
-    }
-    conn.execute_batch(DT_ROW).expect("seed row");
-    let probe = script.last().expect("a query");
-    conn.query_row(probe, [], |r| r.get::<_, Option<f64>>(0))
-        .unwrap_or_else(|e| panic!("query failed: {e}\n{probe}"))
+    eval_row::<f64>(DT_DDL, DT_ROW, select_list)
 }
 
 /// Run the translated form of `select_list` against the string table, seeded
 /// with `row` (a raw SQLite INSERT statement). Returns the first column as a
 /// string.
 fn eval_str(row: &str, select_list: &str) -> Option<String> {
-    let script = translate_sql(&format!("{STR_DDL}\nSELECT {select_list} FROM t WHERE id = 1;"));
-    let conn = Connection::open_in_memory().expect("in-memory SQLite");
-    for stmt in &script[..script.len() - 1] {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
-    }
-    conn.execute_batch(row).expect("seed row");
-    let probe = script.last().expect("a query");
-    conn.query_row(probe, [], |r| r.get::<_, Option<String>>(0))
-        .unwrap_or_else(|e| panic!("query failed: {e}\n{probe}"))
+    eval_row::<String>(STR_DDL, row, select_list)
 }
 
 /// Like `eval_str` but returns the first column as a 64-bit integer. Used for
 /// functions that return INTEGER in SQLite (e.g. INSTR, length).
 fn eval_str_i64(row: &str, select_list: &str) -> Option<i64> {
-    let script = translate_sql(&format!("{STR_DDL}\nSELECT {select_list} FROM t WHERE id = 1;"));
-    let conn = Connection::open_in_memory().expect("in-memory SQLite");
-    for stmt in &script[..script.len() - 1] {
-        conn.execute_batch(&format!("{stmt};"))
-            .unwrap_or_else(|e| panic!("DDL failed: {e}\n{stmt}"));
-    }
-    conn.execute_batch(row).expect("seed row");
-    let probe = script.last().expect("a query");
-    conn.query_row(probe, [], |r| r.get::<_, Option<i64>>(0))
-        .unwrap_or_else(|e| panic!("query failed: {e}\n{probe}"))
+    eval_row::<i64>(STR_DDL, row, select_list)
 }
 
 // ── EXTRACT

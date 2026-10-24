@@ -3,18 +3,10 @@
 #[path = "helpers/run_translated.rs"]
 mod run_translated_helper;
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
+use helpers::translate_default_statements as translate;
+use pg2sqlite::prelude::Pg2SqliteOptions;
 use run_translated_helper::run_translated_with;
-
-fn translate(sql: &str) -> Result<Vec<String>, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(pg2sqlite::script::Script::into_vec)
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect())
-        .map_err(|e| e.to_string())
-}
 
 fn translate_joined(sql: &str) -> Result<String, String> {
     translate(sql).map(|v| v.join("\n"))

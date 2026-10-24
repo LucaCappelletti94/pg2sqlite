@@ -15,6 +15,8 @@
 use diesel::prelude::*;
 use pg2sqlite::prelude::{Error, Pg2Sqlite, Pg2SqliteOptions};
 
+mod helpers;
+
 mod schema {
     diesel::table! {
         oc (id) {
@@ -61,13 +63,7 @@ fn translate(dml: &str) -> Vec<String> {
 
 /// Runs every emitted statement, and panics if any of them fails.
 fn apply(dml: &str) -> SqliteConnection {
-    let mut connection = SqliteConnection::establish(":memory:").expect("connect");
-    for statement in translate(dml) {
-        diesel::sql_query(&statement)
-            .execute(&mut connection)
-            .unwrap_or_else(|error| panic!("emitted statement failed: {statement}: {error}"));
-    }
-    connection
+    helpers::apply_statements(&translate(dml))
 }
 
 /// The first execution failure, for the cases where PostgreSQL raises one.

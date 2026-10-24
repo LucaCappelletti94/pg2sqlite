@@ -6,22 +6,11 @@
 //! - CTE (WITH clause) body expressions
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
-use sqlparser::ast::Statement;
+#[path = "helpers/translate.rs"]
+mod translate_helpers;
+use translate_helpers::translate_default_first_query as translate_ok;
 
 const SCHEMA: &str = "CREATE TABLE events (id INT PRIMARY KEY, val FLOAT, created_at TIMESTAMP);";
-
-fn translate_ok(sql: &str) -> String {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .unwrap()
-        .translate(&Pg2SqliteOptions::default())
-        .unwrap()
-        .into_vec()
-        .into_iter()
-        .find(|s| matches!(s, Statement::Query(_)))
-        .unwrap()
-        .to_string()
-}
 
 // Inline OVER (PARTITION BY <pg-expr>) — partition_by expressions must be
 // translated, not left as PG syntax.

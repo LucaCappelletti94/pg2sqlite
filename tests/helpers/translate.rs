@@ -50,3 +50,21 @@ pub fn translate_default_err(sql: &str) -> String {
         .unwrap_err()
         .to_string()
 }
+
+/// Translates `pg` SQL with default options and returns the first emitted
+/// query as a string. Panics when parsing or translation fails or when no
+/// query is emitted.
+#[allow(dead_code)]
+pub fn translate_default_first_query(sql: &str) -> String {
+    use sqlparser::ast::Statement;
+    Pg2Sqlite::default()
+        .sql(sql)
+        .unwrap()
+        .translate(&Pg2SqliteOptions::default())
+        .unwrap()
+        .into_vec()
+        .into_iter()
+        .find(|s| matches!(s, Statement::Query(_)))
+        .unwrap()
+        .to_string()
+}

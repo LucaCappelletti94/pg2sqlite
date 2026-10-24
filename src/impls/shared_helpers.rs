@@ -2376,16 +2376,7 @@ fn translate_table_function_args<D: TranslationDirection>(
             .iter()
             .map(|arg| translate_function_arg::<D>(arg, schema, options, emit))
             .collect::<Result<Vec<_>, _>>()?,
-        settings: args
-            .settings
-            .as_ref()
-            .map(|settings| {
-                settings
-                    .iter()
-                    .map(|setting| translate_setting::<D>(setting, schema, options, emit))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?,
+        settings: translate_query_settings::<D>(args.settings.as_ref(), schema, options, emit)?,
     })
 }
 

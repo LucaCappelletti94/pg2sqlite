@@ -483,7 +483,7 @@ fn substitute_do_update_defaults(
 /// order, which is what PostgreSQL fills an omitted list from. Comparison
 /// against these names is case-insensitive at every caller, to match
 /// PostgreSQL's identifier folding.
-fn insert_column_names(
+pub(crate) fn insert_column_names(
     insert: &Insert,
     table: &ParserTable,
     schema: &ParserDB,

@@ -3,18 +3,10 @@
 //! Verifies that table-level FOREIGN KEY constraints translate
 //! characteristics consistently with column-level FK (column_option.rs).
 
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::prelude::Pg2SqliteOptions;
 mod helpers;
 
-fn translate(sql: &str) -> Result<String, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(pg2sqlite::script::Script::into_vec)
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
-        .map_err(|e| e.to_string())
-}
+use helpers::translate_default_joined as translate;
 
 #[test]
 fn fk_deferrable_initially_deferred_translates_consistently() {

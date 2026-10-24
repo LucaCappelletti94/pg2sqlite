@@ -10,6 +10,9 @@
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+mod helpers;
+
+use helpers::reverse_sql_err as reverse_err;
 
 fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
     let translator = Pg2Sqlite::default().sql(pg_ddl).unwrap();
@@ -21,15 +24,6 @@ fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
     Parser::parse_sql(&PostgreSqlDialect {}, &pg)
         .unwrap_or_else(|e| panic!("output must parse as PostgreSQL: {e}\n{pg}"));
     pg
-}
-
-fn reverse_err(pg_ddl: &str, sqlite_sql: &str) -> String {
-    let translator = Pg2Sqlite::default().sql(pg_ddl).unwrap();
-    let schema = translator.build_schema().unwrap();
-    translator
-        .reverse_sql(sqlite_sql, &schema, &Pg2SqliteOptions::default())
-        .unwrap_err()
-        .to_string()
 }
 
 fn forward(pg_sql: &str) -> Vec<String> {

@@ -68,23 +68,7 @@ fn apply(pg: &str) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
     apply_with(pg, &Pg2SqliteOptions::default())
 }
 
-/// Translates `pg` and applies every emitted statement to a fresh database.
-///
-/// The generated SQL is itself the artifact under test, so it is applied as
-/// text rather than through the query DSL. That is the documented exception: no
-/// typed query can stand in for "execute exactly what the translator emitted".
-/// Every assertion about the resulting data uses the DSL.
-fn apply_with(
-    pg: &str,
-    options: &Pg2SqliteOptions,
-) -> Result<SqliteConnection, Box<dyn std::error::Error>> {
-    let statements = Pg2Sqlite::default().sql(pg)?.translate(options)?.into_vec();
-    let mut conn = SqliteConnection::establish(":memory:")?;
-    for statement in &statements {
-        sql_query(statement.to_string()).execute(&mut conn)?;
-    }
-    Ok(conn)
-}
+use helpers::apply_with_options as apply_with;
 
 /// Seeds both tables through the typed DSL.
 fn seed(conn: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {

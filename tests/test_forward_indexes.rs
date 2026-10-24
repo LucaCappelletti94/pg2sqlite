@@ -6,19 +6,10 @@ mod helpers;
 mod run_translated_helper;
 #[path = "helpers/translate.rs"]
 mod translate_helpers;
+use helpers::translate_default_statements as translate_result;
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use run_translated_helper::run_translated_with;
 use translate_helpers::translate_default as translate;
-
-fn translate_result(sql: &str) -> Result<Vec<String>, String> {
-    Pg2Sqlite::default()
-        .sql(sql)
-        .map_err(|e| e.to_string())?
-        .translate(&Pg2SqliteOptions::default())
-        .map(pg2sqlite::script::Script::into_vec)
-        .map(|stmts| stmts.iter().map(ToString::to_string).collect())
-        .map_err(|e| e.to_string())
-}
 
 /// Executes all statements emitted by translating `sql` against real in-memory
 /// SQLite. Used after substring asserts to prove the translated output runs

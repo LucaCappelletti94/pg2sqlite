@@ -11,6 +11,9 @@
 //! SQLite answers 'colval' for both spellings; the bare form is the defect.
 
 use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+mod helpers;
+
+use helpers::reverse_sql_err as reverse_err;
 
 fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
     let translator = Pg2Sqlite::default().sql(pg_ddl).unwrap();
@@ -21,13 +24,6 @@ fn reverse(pg_ddl: &str, sqlite_sql: &str) -> String {
     sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, &pg)
         .unwrap_or_else(|e| panic!("output must parse as PostgreSQL: {e}\n{pg}"));
     pg
-}
-
-fn reverse_err(pg_ddl: &str, sqlite_sql: &str) -> String {
-    let translator = Pg2Sqlite::default().sql(pg_ddl).unwrap();
-    let schema = translator.build_schema().unwrap();
-    let options = Pg2SqliteOptions::default();
-    translator.reverse_sql(sqlite_sql, &schema, &options).unwrap_err().to_string()
 }
 
 // Schema with a column named `user` — the prime pseudo-expression collision.

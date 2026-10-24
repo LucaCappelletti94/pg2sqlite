@@ -8,11 +8,10 @@
 //!   4. GENERATED ALWAYS AS IDENTITY (START WITH …)
 //!   5. PRIMARY KEY / UNIQUE DEFERRABLE at column level
 
-use pg2sqlite::{
-    prelude::{Pg2Sqlite, Pg2SqliteOptions},
-    warnings::TranslationWarning,
-};
+use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
 use rusqlite::Connection;
+
+mod helpers;
 
 fn opts() -> Pg2SqliteOptions {
     Pg2SqliteOptions::default()
@@ -25,13 +24,7 @@ fn translate(sql: &str) -> Result<Vec<String>, pg2sqlite::errors::Error> {
         .map(pg2sqlite::script::Script::into_vec)
 }
 
-fn translate_with_warnings(
-    sql: &str,
-) -> Result<(Vec<String>, Vec<TranslationWarning>), pg2sqlite::errors::Error> {
-    let report = Pg2Sqlite::default().sql(sql)?.translate_with_report(&opts())?;
-    let stmts = report.script.iter().map(|s| s.to_string()).collect();
-    Ok((stmts, report.warnings))
-}
+use helpers::translate_with_default_warnings as translate_with_warnings;
 
 /// Executes every statement through rusqlite and returns the first error.
 fn sqlite_exec(stmts: &[String]) -> Result<(), rusqlite::Error> {

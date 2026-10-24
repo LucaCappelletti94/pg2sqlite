@@ -164,24 +164,6 @@ const ITEMS_SCHEMA: &str = "
     FOR EACH ROW EXECUTE FUNCTION items_maintain();
 ";
 
-fn apply_items(pg: &str) -> SqliteConnection {
-    let opts = Pg2SqliteOptions::default().with_rls_audit_table_name("rls_audit");
-    let stmts = Pg2Sqlite::default()
-        .sql(pg)
-        .expect("parse")
-        .translate_to_sql(&opts)
-        .expect("translate")
-        .into_vec();
-    let mut conn = SqliteConnection::establish(":memory:").expect("connect");
-    diesel::sql_query("PRAGMA recursive_triggers = ON").execute(&mut conn).expect("pragma");
-    for stmt in &stmts {
-        diesel::sql_query(stmt.as_str())
-            .execute(&mut conn)
-            .unwrap_or_else(|e| panic!("DDL: {e}\n{stmt}"));
-    }
-    conn
-}
-
 /// Two maintained columns produce an OR-joined exemption WHEN clause with two
 /// IS DISTINCT FROM conditions (rls.rs lines 2266-2284).  The INSERT must
 /// succeed because the maintenance update passes the WHEN clause.
@@ -208,7 +190,7 @@ fn rls_two_column_maintenance_trigger_exemption_fires() {
     assert!(update_check.contains(" OR "), "conditions must be joined by OR: {update_check}");
 
     // Execute: INSERT through the view must succeed.
-    let mut conn = apply_items(ITEMS_SCHEMA);
+    let mut conn = apply(ITEMS_SCHEMA);
     diesel::insert_into(items::table)
         .values((items::id.eq(1_i32), items::tag.eq("hello"), items::slug.eq("world")))
         .execute(&mut conn)
