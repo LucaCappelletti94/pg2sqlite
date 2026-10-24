@@ -32,8 +32,8 @@ use crate::{
             qualify_do_update_column_refs, refuse_sqlite_specific_names,
         },
         shared_helpers::{
-            numeric_minor_unit_scales_of_table, translate_on_conflict_do_update,
-            translate_returning,
+            numeric_minor_unit_scales_of_table, translate_conflict_predicate,
+            translate_on_conflict_do_update, translate_returning,
         },
         translator_impls::insert::{for_each_insert_position, insert_target_scope},
     },
@@ -198,8 +198,10 @@ fn build_upsert_on_conflict(
         });
     }
 
-    let conflict_target =
-        ConflictTarget::Columns(pk_columns.iter().map(|c| Ident::new(c.clone())).collect());
+    let conflict_target = ConflictTarget::Columns {
+        columns: pk_columns.iter().map(|c| Ident::new(c.clone())).collect(),
+        predicate: None,
+    };
 
     // Iterate all non-PK columns in schema order. Named columns get
     // EXCLUDED.<col> so the incoming value wins. Omitted columns get DEFAULT
@@ -524,6 +526,13 @@ impl ReverseTranslator for Insert {
                 qualify_do_update_column_refs(do_update, &target.value);
             }
             insert.on = Some(translated);
+        }
+        if let Some(OnInsert::OnConflict(OnConflict {
+            conflict_target,
+            action: OnConflictAction::DoNothing,
+        })) = &mut insert.on
+        {
+            translate_conflict_predicate::<Reverse>(conflict_target, schema, options, &mut |_| {})?;
         }
 
         // Unscale integer literals in VALUES rows at NUMERIC column positions.

@@ -1007,7 +1007,7 @@ fn translate_truncate(
                     partitions: vec![],
                     json_path: None,
                     sample: None,
-                    index_hints: vec![],
+                    index_directives: vec![],
                     with_ordinality: false,
                 },
                 joins: vec![],
@@ -1087,13 +1087,8 @@ fn reject_untranslatable_truncate_options(truncate: &Truncate) -> Result<(), Err
 /// rows are carried inline in the migration file, so a silent drop loses data.
 ///
 /// Translating that form into multi-row `INSERT`s would be the better answer
-/// for a migration translator, and it is blocked upstream rather than merely
-/// unimplemented. `Parser::parse_tab_value` flattens the payload into a
-/// `Vec<Option<String>>` holding no row boundaries, since a tab and a newline
-/// both just push a value, and a `\N` null leaves a phantom empty field that
-/// desynchronises the list. Row structure cannot be recovered from the AST, and
-/// the raw text is consumed by then. Pinned by
-/// `sqlparser_still_flattens_copy_payload_rows` so this is revisited if fixed.
+/// for a migration translator, and it is not implemented, so it is refused with
+/// the rest.
 fn reject_copy(source: &CopySource, to: bool, target: &CopyTarget) -> Error {
     let subject = match source {
         CopySource::Table { table_name, .. } => format!("COPY {table_name}"),
@@ -1993,6 +1988,9 @@ impl crate::traits::translator::TranslatorWithContext for Statement {
             }
             Self::AlterCollation(_) => {
                 drop_with_warning("ALTER COLLATION", REASON_HOST_REGISTERED, emit)
+            }
+            Self::CreateAggregate(_) => {
+                drop_with_warning("CREATE AGGREGATE", REASON_HOST_REGISTERED, emit)
             }
             Self::CreateFunction(create_function) => {
                 translate_create_function(create_function, options, emit)

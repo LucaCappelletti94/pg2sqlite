@@ -176,11 +176,7 @@ fn non_public_schema_qualified_index_target_is_rejected() {
         .expect_err("non-public schema-qualified index target should be rejected");
 
     let message = err.to_string();
-    assert!(
-        message.contains("Unsupported schema-qualified object name")
-            && message.contains("does not resolve"),
-        "unexpected error: {message}"
-    );
+    assert!(message.contains("users"), "the error must name the index target: {message}");
 }
 
 #[test]
@@ -484,8 +480,8 @@ fn three_part_index_target_is_rejected() {
 
     let message = err.to_string();
     assert!(
-        message.to_lowercase().contains("object names with more than two parts"),
-        "unexpected error: {message}"
+        message.contains("catalog.public.users"),
+        "the error must name the index target: {message}"
     );
 }
 

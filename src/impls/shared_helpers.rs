@@ -1813,7 +1813,8 @@ fn is_decimal_number_literal(expr: &Expr) -> bool {
     }
 }
 
-/// Translates DO UPDATE assignments and WHERE inside an ON CONFLICT clause.
+/// Translates the DO UPDATE assignments and WHERE inside an ON CONFLICT
+/// clause, and the predicate of its conflict target.
 ///
 /// `rewrites` carries the target table's column-typed rewrites, since a DO
 /// UPDATE writes into the same columns the insert does. Empty for the reverse
@@ -1845,13 +1846,31 @@ pub(crate) fn translate_on_conflict_do_update<D: TranslationDirection>(
         .as_ref()
         .map(|expr| D::translate_expr(expr, schema, options, emit))
         .transpose()?;
+    let mut conflict_target = on_conflict.conflict_target.clone();
+    translate_conflict_predicate::<D>(&mut conflict_target, schema, options, emit)?;
     Ok(sqlparser::ast::OnInsert::OnConflict(sqlparser::ast::OnConflict {
-        conflict_target: on_conflict.conflict_target.clone(),
+        conflict_target,
         action: sqlparser::ast::OnConflictAction::DoUpdate(sqlparser::ast::DoUpdate {
             assignments,
             selection,
         }),
     }))
+}
+
+/// Translates the `WHERE` predicate of a column conflict target, which picks a
+/// partial unique index as the arbiter in both dialects.
+pub(crate) fn translate_conflict_predicate<D: TranslationDirection>(
+    conflict_target: &mut Option<sqlparser::ast::ConflictTarget>,
+    schema: &ParserDB,
+    options: &D::Options<'_>,
+    emit: crate::warnings::WarningSink<'_>,
+) -> Result<(), Error> {
+    if let Some(sqlparser::ast::ConflictTarget::Columns { predicate: Some(predicate), .. }) =
+        conflict_target
+    {
+        *predicate = D::translate_expr(predicate, schema, options, emit)?;
+    }
+    Ok(())
 }
 
 /// True when `expr` is the bare `DEFAULT` keyword.
@@ -3994,7 +4013,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
             partitions,
             json_path,
             sample,
-            index_hints,
+            index_directives,
         } => {
             // generate_series with args parses as TableFactor::Table (not
             // Function).
@@ -4075,7 +4094,7 @@ pub(crate) fn translate_table_factor<D: TranslationDirection>(
                     .as_ref()
                     .map(|sample| translate_table_sample_kind::<D>(sample, schema, options, emit))
                     .transpose()?,
-                index_hints: index_hints.clone(),
+                index_directives: index_directives.clone(),
             }
         }
         TableFactor::Derived { subquery, lateral, alias, sample } => {
@@ -4431,7 +4450,7 @@ fn renamed_relation_factor<D: TranslationDirection>(
         partitions: Vec::new(),
         json_path: None,
         sample: None,
-        index_hints: Vec::new(),
+        index_directives: Vec::new(),
     };
 
     Ok(TableFactor::Derived {

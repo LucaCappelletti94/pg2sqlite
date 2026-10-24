@@ -97,7 +97,7 @@ fn update_with_joined_target_table_is_rejected() {
             partitions: vec![],
             json_path: None,
             sample: None,
-            index_hints: vec![],
+            index_directives: vec![],
             with_ordinality: false,
         },
         global: false,
