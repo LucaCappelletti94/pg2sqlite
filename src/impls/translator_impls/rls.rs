@@ -308,6 +308,7 @@ const RLS_VIOLATION_ERROR: &str = "new row violates row-level security policy";
 
 /// True when `expr` is the boolean literal `true`, possibly wrapped in
 /// redundant parentheses. Such a predicate constrains nothing.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_true_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Value(value) => matches!(value.value, Value::Boolean(true)),
@@ -903,6 +904,7 @@ fn collect_patterns_from_function(func: &Function, patterns: &mut Vec<SessionVar
     }
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn collect_patterns_from_table_factor(
     factor: &TableFactor,
     patterns: &mut Vec<SessionVariablePattern>,
@@ -963,6 +965,7 @@ fn collect_patterns_from_select(
     }
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn collect_patterns_from_set_expr(
     set_expr: &sqlparser::ast::SetExpr,
     patterns: &mut Vec<SessionVariablePattern>,
@@ -985,6 +988,7 @@ fn collect_patterns_from_set_expr(
     }
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn collect_patterns_from_query(
     query: &sqlparser::ast::Query,
     patterns: &mut Vec<SessionVariablePattern>,
@@ -1032,6 +1036,7 @@ fn collect_patterns_from_query(
 }
 
 /// Collect all session variable patterns used by an expression tree.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn collect_session_variable_patterns(expr: &Expr, patterns: &mut Vec<SessionVariablePattern>) {
     match expr {
         Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("current_user") => {
@@ -1233,6 +1238,7 @@ fn transform_window_frame_bound_rls(
 }
 
 #[allow(clippy::too_many_lines)]
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn transform_expr_generic(
     expr: &Expr,
     options: &crate::options::TranslationContext<'_>,
@@ -1550,6 +1556,7 @@ fn transform_query(
 /// before; the `SetOperation` case recurses into both arms so that an outer
 /// table reference inside any arm (e.g. a `UNION ALL`) is reached; the `Query`
 /// case calls `transform_query` on the nested query.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn transform_set_expr(
     set_expr: &sqlparser::ast::SetExpr,
     context: &SubqueryTransformContext<'_>,
@@ -1815,6 +1822,7 @@ fn transform_function_arg_with_rls(
     }
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn transform_outer_table_refs(
     expr: &Expr,
     outer_table_name: &str,
@@ -1879,6 +1887,7 @@ fn rls_read_predicate(
 /// Collects the unqualified name of every table that appears in a direct
 /// subquery FROM clause within `expr`, aliased or not. Both spellings are read
 /// through the table's view, so both can close a cycle.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn collect_subquery_tables(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {

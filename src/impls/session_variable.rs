@@ -315,6 +315,7 @@ pub(crate) fn same_postgres_type(left: &DataType, right: &DataType) -> bool {
 /// change nothing a membership test reads, since `current_setting` already
 /// answers text.
 #[must_use]
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn setting_operand(expr: &Expr) -> &Expr {
     match expr {
         Expr::Nested(inner)

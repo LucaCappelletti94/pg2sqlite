@@ -19,6 +19,9 @@ sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main
 git2 = { version = "0.21", optional = true }
 tempfile = { version = "3.27", optional = true }
 thiserror = { version = "2.0", default-features = false }
+# Grows the stack on demand in the translator's recursion, as `sqlparser`'s
+# `recursive-protection` does in its parser.
+recursive = { version = "0.1", optional = true }
 # Optional Arbitrary impls on the public option types so fuzz harnesses
 # can drive `Pg2SqliteOptions` (and its dependent enums) from libfuzzer
 # input bytes. Gated behind the `arbitrary` feature so production
@@ -56,7 +59,7 @@ optional = true
 [features]
 # Default feature: pulls in everything that depends on the host environment
 # (filesystem-backed loaders, git-backed loaders, std-bound error variants,
-# and the `recursive-protection` stack guard from sqlparser). Drop this with
+# and the stack growth in sqlparser's parser and this crate's translator). Drop this with
 # `--no-default-features` to build for `wasm32-unknown-unknown` or other
 # no_std targets. The `[patch.crates-io]` block below tracks apache main,
 # which makes `sqlparser/visitor` no_std-compatible.
@@ -65,6 +68,7 @@ std = [
     "sqlparser/std",
     "sqlparser/recursive-protection",
     "sql-traits/std",
+    "dep:recursive",
     "thiserror/std",
     "git",
 ]

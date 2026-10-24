@@ -40,6 +40,7 @@ pub(crate) enum TemporalKind {
 
 /// Resolve the temporal type of `expr` from its own spelling or from the
 /// declared type of the column it names.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn temporal_kind(
     expr: &Expr,
     schema: &ParserDB,
@@ -159,6 +160,7 @@ fn binary_result_kind(
     })
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_interval(expr: &Expr) -> bool {
     match expr {
         Expr::Interval(_) => true,

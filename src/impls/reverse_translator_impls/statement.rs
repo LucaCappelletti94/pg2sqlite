@@ -412,6 +412,7 @@ impl ReverseTranslator for Statement {
         schema: &Self::Schema,
         options: &crate::options::TranslationContext<'_>,
     ) -> Result<Self::PostgresEntry, Error> {
+        crate::impls::stack_headroom::ensure();
         ensure_usable_rls_table_suffix(options)?;
         let mut translated = match self {
             Statement::Insert(insert) => {

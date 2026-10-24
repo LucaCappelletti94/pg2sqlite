@@ -104,6 +104,7 @@ pub(crate) fn integer_literal(value: i64) -> Expr {
 /// a narrower type convert at the call site, so the range a caller accepts is
 /// stated where that caller decides it rather than here.
 #[must_use]
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn integer_literal_value(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Value(ValueWithSpan { value: Value::Number(digits, _), .. }) => digits.parse().ok(),

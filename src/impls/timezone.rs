@@ -99,6 +99,7 @@ pub(crate) enum TimestampAwareness {
 ///
 /// Both directions need this and must agree: the forward direction negates an
 /// aware operand's offset, so the reverse direction has to negate it back.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn timestamp_awareness(
     expr: &Expr,
     schema: &ParserDB,

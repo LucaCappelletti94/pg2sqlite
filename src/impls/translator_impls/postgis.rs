@@ -547,6 +547,7 @@ pub(crate) fn single_base_table(twj: &TableWithJoins) -> Option<(String, Option<
 /// (no `OR`, no `NOT`). Conjuncts may themselves contain `OR` or `NOT`
 /// internally - what we forbid is `OR` or `NOT` at the boolean root, because
 /// that would mean the spatial predicate isn't a required filter.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_safe_top_level_and(expr: &sqlparser::ast::Expr) -> bool {
     match expr {
         sqlparser::ast::Expr::BinaryOp { op: BinaryOperator::And, left, right } => {
@@ -566,6 +567,7 @@ fn flatten_top_level_and(expr: &sqlparser::ast::Expr) -> Vec<&sqlparser::ast::Ex
     out
 }
 
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn walk_and<'a>(expr: &'a sqlparser::ast::Expr, out: &mut Vec<&'a sqlparser::ast::Expr>) {
     if let sqlparser::ast::Expr::BinaryOp { op: BinaryOperator::And, left, right } = expr {
         walk_and(left, out);

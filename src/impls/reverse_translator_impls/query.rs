@@ -162,6 +162,7 @@ impl ReverseTranslator for Query {
     type Schema = ParserDB;
     type PostgresEntry = Query;
 
+    #[cfg_attr(feature = "std", recursive::recursive)]
     fn reverse_translate(
         &self,
         schema: &Self::Schema,

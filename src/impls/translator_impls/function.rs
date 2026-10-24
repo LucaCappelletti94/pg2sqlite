@@ -1245,6 +1245,7 @@ fn declares_function_by_option(name: &str, options: &Pg2SqliteOptions) -> bool {
 /// It cannot see through a bare column reference, so an array or `json` COLUMN
 /// takes the `json_quote` path and is quoted into a string, which is wrong and
 /// needs the column's declared type to fix. Tracked as R89.
+#[cfg_attr(feature = "std", recursive::recursive)]
 fn is_already_json(expr: &Expr) -> bool {
     const JSON_VALUED: [&str; 10] = [
         "json",
@@ -1347,6 +1348,7 @@ fn resolves_to_non_textual_column(
 /// thing that separates a document from its own text. An unqualified name is
 /// accepted only when every column with that name in the schema agrees, since
 /// guessing between the two is wrong half the time in either direction.
+#[cfg_attr(feature = "std", recursive::recursive)]
 pub(crate) fn carries_json(
     expr: &Expr,
     schema: &ParserDB,
