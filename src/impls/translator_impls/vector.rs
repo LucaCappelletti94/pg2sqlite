@@ -106,10 +106,10 @@ pub(crate) fn halfvec_refusal() -> Error {
 /// Extract dimension count from a vector type like vector(384).
 pub(crate) fn extract_dimensions(data_type: &DataType) -> Option<u32> {
     // The modifier list carries the type arguments, so `vector(384)` arrives
-    // as the single modifier "384".
+    // as the single numeric modifier 384.
     if let DataType::Custom(_, modifiers) = data_type
-        && let Some(first_mod) = modifiers.first()
-        && let Ok(dim) = first_mod.parse::<u32>()
+        && let Some(sqlparser::ast::TypeModifier::Number(digits, false)) = modifiers.first()
+        && let Ok(dim) = digits.parse::<u32>()
     {
         return Some(dim);
     }

@@ -13,7 +13,7 @@
 //! test; everything read back afterwards goes through the typed diesel DSL.
 
 use diesel::prelude::*;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::prelude::{Error, Pg2Sqlite, Pg2SqliteOptions};
 
 mod schema {
     diesel::table! {
@@ -28,6 +28,14 @@ mod schema {
         uq (id) {
             id -> Integer,
             tag -> Text,
+        }
+    }
+
+    diesel::table! {
+        pu (id) {
+            id -> Integer,
+            k -> Integer,
+            n -> Integer,
         }
     }
 }
@@ -240,26 +248,61 @@ fn returning_reports_only_the_inserted_row() {
     assert_eq!(returned, vec![7]);
 }
 
-// ---------------------------------------------------------------------------
-// Held for upstream
-// ---------------------------------------------------------------------------
+/// A partial unique index keyed on `k` among the rows with a positive `n`,
+/// holding one such row.
+const PARTIAL: &str =
+    "CREATE TABLE pu (id INT PRIMARY KEY, k INT NOT NULL, n INT NOT NULL, tag TEXT);
+     CREATE UNIQUE INDEX pu_k ON pu (k) WHERE n > 0;
+     INSERT INTO pu (id, k, n, tag) VALUES (1, 5, 1, 'a');";
 
-/// PostgreSQL lets the conflict target name a partial unique index by
-/// carrying its predicate, and `sqlparser` has neither the parse branch nor
-/// a field to hold one, so the statement never reaches the translator. Pinned
-/// here so it fails the day upstream gains support and this becomes
-/// translatable work rather than a parse error. See
-/// `upstream/sqlparser-on-conflict-index-predicate.md`.
+fn partial_rows(connection: &mut SqliteConnection) -> Vec<(i32, i32, i32)> {
+    schema::pu::table
+        .select((schema::pu::id, schema::pu::k, schema::pu::n))
+        .order(schema::pu::id)
+        .load(connection)
+        .expect("load")
+}
+
 #[test]
-fn the_index_predicate_target_does_not_reach_the_translator_yet() {
-    let error = Pg2Sqlite::default()
-        .sql(&format!(
-            "{FIXTURE}\nINSERT INTO oc (id, n) VALUES (1, 9) ON CONFLICT (id) WHERE n > 0 DO NOTHING;"
-        ))
-        .expect_err("sqlparser cannot parse an index predicate on a conflict target")
-        .to_string();
-    assert!(
-        error.contains("Expected: DO, found: WHERE"),
-        "the parse must still fail on the predicate: {error}"
+fn an_index_predicate_picks_the_partial_index_as_the_arbiter() {
+    let mut connection = apply(&format!(
+        "{PARTIAL}
+         INSERT INTO pu (id, k, n, tag) VALUES (2, 5, 2, 'b')
+             ON CONFLICT (k) WHERE n > 0 AND tag ILIKE 'B%' DO NOTHING;"
+    ));
+    assert_eq!(partial_rows(&mut connection), [(1, 5, 1)]);
+}
+
+#[test]
+fn an_index_predicate_picks_the_partial_index_for_an_update() {
+    let mut connection = apply(&format!(
+        "{PARTIAL}
+         INSERT INTO pu (id, k, n, tag) VALUES (2, 5, 2, 'b')
+             ON CONFLICT (k) WHERE (n > 0) AND (tag ILIKE 'B%') DO UPDATE SET n = EXCLUDED.n;"
+    ));
+    assert_eq!(partial_rows(&mut connection), [(1, 5, 2)]);
+}
+
+fn arbiter_refused(dml: &str) {
+    let translated = Pg2Sqlite::default()
+        .sql(&format!("{FIXTURE}\n{PARTIAL}\n{dml}"))
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default());
+    assert!(matches!(translated, Err(Error::TranslationRefusal(_))), "{translated:?}");
+}
+
+#[test]
+fn an_index_predicate_implying_no_partial_index_is_refused() {
+    arbiter_refused(
+        "INSERT INTO pu (id, k, n, tag) VALUES (2, 5, 2, 'b') ON CONFLICT (k) WHERE tag = 'b' DO NOTHING;",
+    );
+}
+
+#[test]
+fn an_index_predicate_implying_two_partial_indexes_is_refused() {
+    arbiter_refused(
+        "CREATE UNIQUE INDEX pu_k_tagged ON pu (k) WHERE tag IS NOT NULL;
+         INSERT INTO pu (id, k, n, tag) VALUES (2, 5, 2, 'b')
+             ON CONFLICT (k) WHERE n > 0 AND tag IS NOT NULL DO NOTHING;",
     );
 }

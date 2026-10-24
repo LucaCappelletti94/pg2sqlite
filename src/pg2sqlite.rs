@@ -380,11 +380,9 @@ impl Pg2Sqlite {
 
     pub(crate) fn schema_statement_is_ignored(statement: &Statement) -> bool {
         match statement {
-            Statement::CreateIndex(_) | Statement::CreateTrigger(_) | Statement::DropTrigger(_) => {
-                true
-            }
+            Statement::CreateTrigger(_) | Statement::DropTrigger(_) => true,
             Statement::Drop { object_type, .. } => {
-                !matches!(object_type, ObjectType::Table | ObjectType::View)
+                !matches!(object_type, ObjectType::Table | ObjectType::View | ObjectType::Index)
             }
             _ => false,
         }

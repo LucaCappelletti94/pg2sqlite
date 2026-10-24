@@ -28,7 +28,7 @@ use crate::{
         shared_helpers::{
             ColumnReferences, ColumnRewrites, carries_default_keyword, declares_always_identity,
             extract_columns_from_expr, is_default_keyword, substituted_assignment_default,
-            translate_on_conflict_do_update, translate_returning,
+            translate_conflict_predicate, translate_on_conflict_do_update, translate_returning,
         },
         translator_impls::rls,
     },
@@ -175,69 +175,15 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
         apply_column_type_conversions(&mut insert, target.optional(), schema, options)?;
 
         if let Some(on_insert) = &self.on {
-            match on_insert {
-                sqlparser::ast::OnInsert::OnConflict(on_conflict) => {
-                    match &on_conflict.action {
-                        sqlparser::ast::OnConflictAction::DoNothing => {
-                            // PostgreSQL suppresses a conflict on the arbiter
-                            // index and nothing else, which is exactly what
-                            // SQLite's upsert clause does. `INSERT OR IGNORE`
-                            // suppresses every constraint failure the
-                            // statement can raise, so a CHECK or NOT NULL
-                            // violation PostgreSQL reports became a silently
-                            // skipped row. The target needs the same lookup
-                            // `DO UPDATE` gives it, since it is no longer
-                            // discarded.
-                            insert.on = Some(sqlparser::ast::OnInsert::OnConflict(
-                                sqlparser::ast::OnConflict {
-                                    conflict_target: resolve_conflict_target(
-                                        on_conflict.conflict_target.as_ref(),
-                                        &insert.table,
-                                        &mut target,
-                                        schema,
-                                    )?,
-                                    action: sqlparser::ast::OnConflictAction::DoNothing,
-                                },
-                            ));
-                        }
-                        sqlparser::ast::OnConflictAction::DoUpdate(do_update) => {
-                            // The conflict target has to name columns before it
-                            // reaches the shared translator, which copies it
-                            // through.
-                            let resolved = sqlparser::ast::OnConflict {
-                                conflict_target: resolve_conflict_target(
-                                    on_conflict.conflict_target.as_ref(),
-                                    &insert.table,
-                                    &mut target,
-                                    schema,
-                                )?,
-                                action: on_conflict.action.clone(),
-                            };
-                            // PostgreSQL accepts DEFAULT in a DO UPDATE list
-                            // and stores the declared default, so it is
-                            // substituted here, where the target table is in
-                            // hand, before the shared translator runs.
-                            let substituted = substitute_do_update_defaults(
-                                do_update,
-                                &insert.table,
-                                &mut target,
-                                schema,
-                                options,
-                                emit,
-                            )?;
-                            let do_update = substituted.as_ref().unwrap_or(do_update);
-                            insert.on = Some(translate_on_conflict_do_update::<Forward>(
-                                &resolved, do_update, schema, options, &rewrites, emit,
-                            )?);
-                        }
-                    }
-                }
-                _ => {
-                    return Err(crate::errors::Error::forward_refusal(format!(
-                        "Unsupported ON INSERT clause: {on_insert:?}"
-                    )));
-                }
-            }
+            translate_on_insert(
+                on_insert,
+                &mut insert,
+                &mut target,
+                &rewrites,
+                schema,
+                options,
+                emit,
+            )?;
         }
 
         if matches!(insert.on, Some(sqlparser::ast::OnInsert::OnConflict(_))) {
@@ -256,6 +202,59 @@ impl crate::traits::translator::TranslatorWithContext for Insert {
 
         Ok(insert)
     }
+}
+
+/// Translates the `ON CONFLICT` clause onto `insert`, refusing every other
+/// `ON` clause.
+fn translate_on_insert(
+    on_insert: &sqlparser::ast::OnInsert,
+    insert: &mut Insert,
+    target: &mut ResolvedInsertTarget<'_>,
+    rewrites: &ColumnRewrites,
+    schema: &ParserDB,
+    options: &crate::options::TranslationContext<'_>,
+    emit: &mut dyn FnMut(crate::warnings::TranslationWarning),
+) -> Result<(), crate::errors::Error> {
+    let sqlparser::ast::OnInsert::OnConflict(on_conflict) = on_insert else {
+        return Err(crate::errors::Error::forward_refusal(format!(
+            "Unsupported ON INSERT clause: {on_insert:?}"
+        )));
+    };
+    let conflict_target = resolve_conflict_target(
+        on_conflict.conflict_target.as_ref(),
+        &insert.table,
+        target,
+        schema,
+    )?;
+    match &on_conflict.action {
+        sqlparser::ast::OnConflictAction::DoNothing => {
+            // Unlike `INSERT OR IGNORE`, this keeps CHECK and NOT NULL errors.
+            let mut conflict_target = conflict_target;
+            translate_conflict_predicate::<Forward>(&mut conflict_target, schema, options, emit)?;
+            insert.on = Some(sqlparser::ast::OnInsert::OnConflict(sqlparser::ast::OnConflict {
+                conflict_target,
+                action: sqlparser::ast::OnConflictAction::DoNothing,
+            }));
+        }
+        sqlparser::ast::OnConflictAction::DoUpdate(do_update) => {
+            let resolved =
+                sqlparser::ast::OnConflict { conflict_target, action: on_conflict.action.clone() };
+            // PostgreSQL writes the declared default for a DO UPDATE DEFAULT.
+            let substituted = substitute_do_update_defaults(
+                do_update,
+                &insert.table,
+                target,
+                schema,
+                options,
+                emit,
+            )?;
+            let do_update = substituted.as_ref().unwrap_or(do_update);
+            insert.on = Some(translate_on_conflict_do_update::<Forward>(
+                &resolved, do_update, schema, options, rewrites, emit,
+            )?);
+        }
+    }
+    Ok(())
 }
 
 /// Gives a bare `SELECT` source the `WHERE` clause SQLite needs to tell an
@@ -298,7 +297,7 @@ fn resolve_conflict_target(
     schema: &ParserDB,
 ) -> Result<Option<sqlparser::ast::ConflictTarget>, crate::errors::Error> {
     let Some(sqlparser::ast::ConflictTarget::OnConstraint(constraint)) = conflict_target else {
-        return Ok(conflict_target.cloned());
+        return resolve_arbiter_predicate(conflict_target, table, target, schema);
     };
 
     let wanted = last_ident_value_or_display(constraint);
@@ -325,13 +324,86 @@ fn resolve_conflict_target(
         if declared.is_some_and(|name| name.eq_ignore_ascii_case(&wanted))
             || generated.eq_ignore_ascii_case(&wanted)
         {
-            return Ok(Some(sqlparser::ast::ConflictTarget::Columns(
-                columns.into_iter().map(sqlparser::ast::Ident::new).collect(),
-            )));
+            return Ok(Some(sqlparser::ast::ConflictTarget::Columns {
+                columns: columns.into_iter().map(sqlparser::ast::Ident::new).collect(),
+                predicate: None,
+            }));
         }
     }
 
     Err(unresolvable_constraint(&wanted, &table_name.to_string()))
+}
+
+/// Replaces a conflict target predicate with the predicate of the partial
+/// unique index it picks as the arbiter.
+///
+/// PostgreSQL picks every unique index on the columns whose predicate the
+/// target predicate implies, while SQLite compares the two expressions
+/// structurally. Implication is read as conjunct containment, so the emitted
+/// predicate is the index's own and SQLite picks the same index.
+fn resolve_arbiter_predicate(
+    conflict_target: Option<&sqlparser::ast::ConflictTarget>,
+    table: &TableObject,
+    target: &mut ResolvedInsertTarget<'_>,
+    schema: &ParserDB,
+) -> Result<Option<sqlparser::ast::ConflictTarget>, crate::errors::Error> {
+    let Some(sqlparser::ast::ConflictTarget::Columns { columns, predicate: Some(predicate) }) =
+        conflict_target
+    else {
+        return Ok(conflict_target.cloned());
+    };
+    let unresolvable = || unresolvable_arbiter(columns, predicate, table);
+    let resolved_table = target.required(unresolvable)?;
+    let written = conjuncts(predicate);
+    let mut arbiters = resolved_table.indices(schema)?.filter_map(|index| {
+        let create = index.attribute();
+        let index_predicate = create.predicate.as_ref()?;
+        let same_columns = create.unique
+            && create.columns.len() == columns.len()
+            && create.columns.iter().all(|indexed| {
+                matches!(&indexed.column.expr, sqlparser::ast::Expr::Identifier(name)
+                    if columns.iter().any(|column| column.value.eq_ignore_ascii_case(&name.value)))
+            });
+        (same_columns && conjuncts(index_predicate).iter().all(|term| written.contains(term)))
+            .then_some(index_predicate)
+    });
+    match (arbiters.next(), arbiters.next()) {
+        (Some(index_predicate), None) => {
+            Ok(Some(sqlparser::ast::ConflictTarget::Columns {
+                columns: columns.clone(),
+                predicate: Some(index_predicate.clone()),
+            }))
+        }
+        _ => Err(unresolvable()),
+    }
+}
+
+/// The `AND` terms of `expr`, with parentheses removed.
+fn conjuncts(expr: &sqlparser::ast::Expr) -> Vec<&sqlparser::ast::Expr> {
+    match expr {
+        sqlparser::ast::Expr::Nested(inner) => conjuncts(inner),
+        sqlparser::ast::Expr::BinaryOp { left, op: sqlparser::ast::BinaryOperator::And, right } => {
+            let mut terms = conjuncts(left);
+            terms.extend(conjuncts(right));
+            terms
+        }
+        other => vec![other],
+    }
+}
+
+fn unresolvable_arbiter(
+    columns: &[sqlparser::ast::Ident],
+    predicate: &sqlparser::ast::Expr,
+    table: &TableObject,
+) -> crate::errors::Error {
+    let columns: Vec<String> = columns.iter().map(ToString::to_string).collect();
+    crate::errors::Error::forward_refusal(format!(
+        "ON CONFLICT ({}) WHERE {predicate} cannot be translated because {table} has no single \
+         partial unique index on those columns whose predicate terms all appear in it, and SQLite \
+         accepts a conflict target predicate only when it is identical to the index predicate. \
+         Write the index predicate itself as the conflict target predicate.",
+        columns.join(", ")
+    ))
 }
 
 /// The name a unique constraint was declared with, or `None` when it was

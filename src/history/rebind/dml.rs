@@ -41,10 +41,12 @@ impl Planner<'_> {
         }
         let mut exprs: Vec<&Expr> = Vec::new();
         if let Some(OnInsert::OnConflict(conflict)) = &insert.on {
-            if let Some(ConflictTarget::Columns(columns)) = &conflict.conflict_target {
+            if let Some(ConflictTarget::Columns { columns, predicate }) = &conflict.conflict_target
+            {
                 for ident in columns {
                     self.target_column(table, ident)?;
                 }
+                exprs.extend(predicate.as_ref());
             }
             if let OnConflictAction::DoUpdate(update) = &conflict.action {
                 for assignment in &update.assignments {
