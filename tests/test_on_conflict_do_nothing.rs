@@ -13,7 +13,7 @@
 //! test; everything read back afterwards goes through the typed diesel DSL.
 
 use diesel::prelude::*;
-use pg2sqlite::prelude::{Pg2Sqlite, Pg2SqliteOptions};
+use pg2sqlite::prelude::{Error, Pg2Sqlite, Pg2SqliteOptions};
 
 mod schema {
     diesel::table! {
@@ -278,7 +278,31 @@ fn an_index_predicate_picks_the_partial_index_for_an_update() {
     let mut connection = apply(&format!(
         "{PARTIAL}
          INSERT INTO pu (id, k, n, tag) VALUES (2, 5, 2, 'b')
-             ON CONFLICT (k) WHERE n > 0 AND tag ILIKE 'B%' DO UPDATE SET n = EXCLUDED.n;"
+             ON CONFLICT (k) WHERE (n > 0) AND (tag ILIKE 'B%') DO UPDATE SET n = EXCLUDED.n;"
     ));
     assert_eq!(partial_rows(&mut connection), [(1, 5, 2)]);
+}
+
+fn arbiter_refused(dml: &str) {
+    let translated = Pg2Sqlite::default()
+        .sql(&format!("{FIXTURE}\n{PARTIAL}\n{dml}"))
+        .expect("parse")
+        .translate_to_sql(&Pg2SqliteOptions::default());
+    assert!(matches!(translated, Err(Error::TranslationRefusal(_))), "{translated:?}");
+}
+
+#[test]
+fn an_index_predicate_implying_no_partial_index_is_refused() {
+    arbiter_refused(
+        "INSERT INTO pu (id, k, n, tag) VALUES (2, 5, 2, 'b') ON CONFLICT (k) WHERE tag = 'b' DO NOTHING;",
+    );
+}
+
+#[test]
+fn an_index_predicate_implying_two_partial_indexes_is_refused() {
+    arbiter_refused(
+        "CREATE UNIQUE INDEX pu_k_tagged ON pu (k) WHERE tag IS NOT NULL;
+         INSERT INTO pu (id, k, n, tag) VALUES (2, 5, 2, 'b')
+             ON CONFLICT (k) WHERE n > 0 AND tag IS NOT NULL DO NOTHING;",
+    );
 }

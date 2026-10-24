@@ -178,6 +178,7 @@ const CASES: &[Case] = &[
     warned("CREATE COLLATION c (provider = 'icu', locale = 'und')"),
     warned("ALTER COLLATION c REFRESH VERSION"),
     warned("DROP COLLATION c"),
+    warned("CREATE AGGREGATE total (int) (SFUNC = int4pl, STYPE = int)"),
     // Warned and dropped: functions, extensions, sequences. A function no
     // trigger calls is genuinely lost, so it warns. The trigger case is in the
     // consumed block above.
