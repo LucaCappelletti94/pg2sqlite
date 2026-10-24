@@ -159,94 +159,64 @@ fn bench_rls_translation(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_select_statements(c: &mut Criterion) {
+/// Benchmarks parsing and translating each of `statements` against the
+/// statement schema, each id under `function` when given.
+fn bench_statements(
+    c: &mut Criterion,
+    group_name: &str,
+    statements: &[(&str, &str)],
+    function: Option<&str>,
+) {
     let options = Pg2SqliteOptions::default();
     let schema = statement_schema();
-    let mut group = c.benchmark_group("statement/select");
+    let mut group = c.benchmark_group(group_name);
+    for (name, sql) in statements {
+        let id = match function {
+            Some(function) => BenchmarkId::new(function, name),
+            None => BenchmarkId::from_parameter(name),
+        };
+        group.bench_with_input(id, *sql, |b, sql| {
+            b.iter(|| {
+                let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
+                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
+            });
+        });
+    }
+    group.finish();
+}
 
+fn bench_select_statements(c: &mut Criterion) {
     let statements: &[(&str, &str)] = &[
         ("simple", SELECT_SIMPLE),
         ("join", SELECT_JOIN),
         ("subquery", SELECT_SUBQUERY),
         ("cte", SELECT_CTE),
     ];
-
-    for (name, sql) in statements {
-        group.bench_with_input(BenchmarkId::from_parameter(name), *sql, |b, sql| {
-            b.iter(|| {
-                let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
-            });
-        });
-    }
-    group.finish();
+    bench_statements(c, "statement/select", statements, None);
 }
 
 fn bench_insert_statements(c: &mut Criterion) {
-    let options = Pg2SqliteOptions::default();
-    let schema = statement_schema();
-    let mut group = c.benchmark_group("statement/insert");
-
     let statements: &[(&str, &str)] = &[
         ("simple", INSERT_SIMPLE),
         ("multi_row", INSERT_MULTI_ROW),
         ("select", INSERT_SELECT),
         ("on_conflict", INSERT_ON_CONFLICT),
     ];
-
-    for (name, sql) in statements {
-        group.bench_with_input(BenchmarkId::from_parameter(name), *sql, |b, sql| {
-            b.iter(|| {
-                let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
-            });
-        });
-    }
-    group.finish();
+    bench_statements(c, "statement/insert", statements, None);
 }
 
 fn bench_update_statements(c: &mut Criterion) {
-    let options = Pg2SqliteOptions::default();
-    let schema = statement_schema();
-    let mut group = c.benchmark_group("statement/update");
-
     let statements: &[(&str, &str)] =
         &[("simple", UPDATE_SIMPLE), ("multi_column", UPDATE_MULTI_COLUMN)];
-
-    for (name, sql) in statements {
-        group.bench_with_input(BenchmarkId::from_parameter(name), *sql, |b, sql| {
-            b.iter(|| {
-                let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
-            });
-        });
-    }
-    group.finish();
+    bench_statements(c, "statement/update", statements, None);
 }
 
 fn bench_delete_statements(c: &mut Criterion) {
-    let options = Pg2SqliteOptions::default();
-    let schema = statement_schema();
-    let mut group = c.benchmark_group("statement/delete");
-
     let statements: &[(&str, &str)] = &[("simple", DELETE_SIMPLE), ("subquery", DELETE_SUBQUERY)];
-
-    for (name, sql) in statements {
-        group.bench_with_input(BenchmarkId::from_parameter(name), *sql, |b, sql| {
-            b.iter(|| {
-                let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
-            });
-        });
-    }
-    group.finish();
+    bench_statements(c, "statement/delete", statements, None);
 }
 
 fn bench_translation_samples(c: &mut Criterion) {
-    let options = Pg2SqliteOptions::default();
-    let schema = statement_schema();
-    let mut group = c.benchmark_group("translation_samples");
-
     let statements: &[(&str, &str)] = &[
         ("select_simple", SELECT_SIMPLE),
         ("select_join", SELECT_JOIN),
@@ -261,16 +231,7 @@ fn bench_translation_samples(c: &mut Criterion) {
             "CREATE TABLE t (id SERIAL PRIMARY KEY, name TEXT NOT NULL, active BOOLEAN, created_at TIMESTAMPTZ);",
         ),
     ];
-
-    for (name, sql) in statements {
-        group.bench_with_input(BenchmarkId::new("pg2sqlite", name), *sql, |b, sql| {
-            b.iter(|| {
-                let parsed = Pg2Sqlite::default().sql(black_box(sql)).unwrap();
-                black_box(parsed.translate_with_schema(&schema, &options).unwrap())
-            });
-        });
-    }
-    group.finish();
+    bench_statements(c, "translation_samples", statements, Some("pg2sqlite"));
 }
 
 const QUERY_SCHEMA: &str = "CREATE TABLE nums (n INTEGER NOT NULL);";

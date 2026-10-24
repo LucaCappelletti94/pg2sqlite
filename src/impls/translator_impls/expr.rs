@@ -2467,6 +2467,15 @@ fn warn_ascii_only_ilike_folding(
     });
 }
 
+/// `datetime(target, modifier..., 'subsec')` with its trailing fractional zeros
+/// trimmed.
+fn shifted_datetime(target: Expr, modifiers: &[String]) -> Expr {
+    let mut args = vec![target];
+    args.extend(modifiers.iter().map(|modifier| string_literal(modifier)));
+    args.push(string_literal("subsec"));
+    trim_trailing_zeros(simple_function_expr("datetime", args, None))
+}
+
 /// Translate a binary operation expression.
 #[allow(clippy::too_many_lines)]
 fn translate_binary_op(
@@ -3186,14 +3195,7 @@ fn translate_binary_op(
                     match interval_date_modifiers_scaled(interval, negating, n)? {
                         Some(modifiers) => {
                             let target = left.translate_with_warnings(schema, options, emit)?;
-                            let mut args = vec![target];
-                            for modifier in modifiers {
-                                args.push(string_literal(&modifier));
-                            }
-                            args.push(string_literal("subsec"));
-                            return Ok(trim_trailing_zeros(simple_function_expr(
-                                "datetime", args, None,
-                            )));
+                            return Ok(shifted_datetime(target, &modifiers));
                         }
                         None => {
                             return Err(crate::errors::Error::forward_refusal(format!(
@@ -3217,12 +3219,7 @@ fn translate_binary_op(
             match interval_date_modifiers(interval, negating)? {
                 Some(modifiers) => {
                     let target = left.translate_with_warnings(schema, options, emit)?;
-                    let mut args = vec![target];
-                    for modifier in modifiers {
-                        args.push(string_literal(&modifier));
-                    }
-                    args.push(string_literal("subsec"));
-                    return Ok(trim_trailing_zeros(simple_function_expr("datetime", args, None)));
+                    return Ok(shifted_datetime(target, &modifiers));
                 }
                 None => {
                     // The notation was not decoded (HH:MM:SS, ISO P-form,

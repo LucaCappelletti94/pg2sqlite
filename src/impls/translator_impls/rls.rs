@@ -1257,25 +1257,28 @@ fn transform_expr_generic(
         }
 
         Expr::Function(func) => {
+            let transform_list = |list: &FunctionArgumentList| {
+                FunctionArgumentList {
+                    duplicate_treatment: list.duplicate_treatment,
+                    args: list
+                        .args
+                        .iter()
+                        .map(|arg| transform_function_arg_with_rls(arg, &recurse))
+                        .collect(),
+                    clauses: list
+                        .clauses
+                        .iter()
+                        .map(|clause| {
+                            transform_function_argument_clause_rls(
+                                clause, options, table, schema, strategy,
+                            )
+                        })
+                        .collect(),
+                }
+            };
             let transformed_args = match &func.args {
                 FunctionArguments::List(arg_list) => {
-                    FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: arg_list.duplicate_treatment,
-                        args: arg_list
-                            .args
-                            .iter()
-                            .map(|arg| transform_function_arg_with_rls(arg, &recurse))
-                            .collect(),
-                        clauses: arg_list
-                            .clauses
-                            .iter()
-                            .map(|clause| {
-                                transform_function_argument_clause_rls(
-                                    clause, options, table, schema, strategy,
-                                )
-                            })
-                            .collect(),
-                    })
+                    FunctionArguments::List(transform_list(arg_list))
                 }
                 FunctionArguments::Subquery(query) => {
                     FunctionArguments::Subquery(Box::new(transform_query(
@@ -1345,23 +1348,7 @@ fn transform_expr_generic(
 
             let transformed_parameters = match &func.parameters {
                 FunctionArguments::List(param_list) => {
-                    FunctionArguments::List(FunctionArgumentList {
-                        duplicate_treatment: param_list.duplicate_treatment,
-                        args: param_list
-                            .args
-                            .iter()
-                            .map(|arg| transform_function_arg_with_rls(arg, &recurse))
-                            .collect(),
-                        clauses: param_list
-                            .clauses
-                            .iter()
-                            .map(|clause| {
-                                transform_function_argument_clause_rls(
-                                    clause, options, table, schema, strategy,
-                                )
-                            })
-                            .collect(),
-                    })
+                    FunctionArguments::List(transform_list(param_list))
                 }
                 other => other.clone(),
             };
